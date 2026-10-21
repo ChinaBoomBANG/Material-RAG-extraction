@@ -48,13 +48,13 @@ retrieval:
 
 # ---------------- 大模型 ----------------
 llm:
-  # openai_compat：任何 OpenAI 兼容服务。默认指向本机 LM Studio。
+  # openai_compat：任何 OpenAI 兼容服务。默认指向本机 LM Studio，也可自行配置云端大模型。
   # 数据是否离开本机，由 base_url 决定，请自行确认。
   backend: "openai_compat"
-  base_url: "http://127.0.0.1:1234/v1"
-  api_key: "lm-studio"            # LM Studio 不校验，占位即可
-  model: "google/gemma-4-12b-qat" # 留空 => 自动取 /v1/models 的第一个模型
-  gen:
+  base_url: ""           # 改成服务商的 OpenAI 兼容地址
+  api_key: ""            # LM Studio 不校验，占位即可
+  model: "" # 留空 => 自动取 /v1/models 的第一个模型
+  gen:                   # 配置云端大模型时，这里的参数可修改，按云端模型上限修改
     temperature: 0.1
     top_p: 0.9
     max_tokens: 6144             # 预测值+实测值并列的表输出更长；2048 会截断成空记录
@@ -62,7 +62,7 @@ llm:
     retries: 1                   # 抽取失败不反复重试，宁可报错也不要把整篇拖成几十分钟
     # 推理型模型必须关掉思考：否则 token 全花在 reasoning 上，正文一个字都出不来
     # （实测 gemma-4-12b-qat 用满 2048 token 思考、输出 0 字）。留空则不发送该字段。
-    reasoning_effort: "none"
+    reasoning_effort: "none"    # 调用大模型时，此处参数【必须清空】
 
 # ---------------- 数据抽取 ----------------
 extract:

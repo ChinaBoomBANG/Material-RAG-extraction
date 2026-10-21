@@ -72,6 +72,12 @@ RAG/
 
 ## 二、快速开始
 
+> **首次运行请先配置 `config.yaml` 的 `llm` 段。**
+> 仓库里的 `base_url`、`api_key`、`model` 都留成了空占位，必须填上你实际使用的服务才能运行：
+> 本地 LM Studio 填 `http://127.0.0.1:1234/v1`、`api_key` 填任意值（它不校验）、`model` 填已加载的模型名；
+> 用云端则填服务商的 OpenAI 兼容地址与密钥，并**清空 `gen.reasoning_effort`**（那是 LM Studio 专用参数，
+> 云端 API 收到它会返回 400）。改动后重启服务生效。
+
 ### 0. 准备（只需一次）
 
 项目使用**你本地的 Python 3.12**（`D:\python\python.exe`）建立独立虚拟环境 `my_venv`，
@@ -94,7 +100,7 @@ python scripts/fetch_embedding_model.py
 
 > 说明：在 WorkBuddy 里我以绝对路径 `my_venv/Scripts/python.exe` 调用，
 > 效果等同于你手动 `activate`。本机已验证：Python 3.12.8、未装 scikit-learn、
-> 自测 38/38 通过、Web 服务正常。
+> 自测 148 项全部通过、Web 服务正常。
 
 ### 1. 让 LM Studio 提供接口
 
