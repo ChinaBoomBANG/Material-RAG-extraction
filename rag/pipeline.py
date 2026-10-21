@@ -315,4 +315,12 @@ class RagPipeline:
             "raw_dir": self.raw_dir,
             "embedding_backend": self.conf["embedding"]["backend"],
             "llm": self.llm.health(),
+            # 界面上的「服务生命周期」文案直接读这里，避免把秒数写死在模板里
+            # （曾经写死 "8 秒"，配置改成 15 秒后界面仍在骗人）
+            "web": {
+                "shutdown_on_page_close": bool(
+                    cfg.get("web.shutdown_on_page_close", True)),
+                "shutdown_grace_s": float(cfg.get("web.shutdown_grace_s", 15)),
+                "idle_timeout_s": float(cfg.get("web.idle_timeout_s", 180)),
+            },
         }

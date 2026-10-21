@@ -712,6 +712,18 @@ def t_chunk_plan(tmp: str):
     check("三模式计数与 plan 接口一致",
           counts == {"table": 3, "auto": 4, "all": 5}, str(counts))
 
+    # 服务生命周期配置必须由接口下发（界面文案不许写死秒数——
+    # 曾把 "8 秒" 硬编码在模板里，配置改成 15 秒后界面仍在骗人）
+    _st = p.status().get("web") or {}
+    _grace = _st.get("shutdown_grace_s")
+    _cfg_grace = float(cfg.get("web.shutdown_grace_s", 15))
+    check("status 下发 web.shutdown_grace_s 且与配置一致",
+          isinstance(_grace, (int, float)) and abs(float(_grace) - _cfg_grace) < 1e-6,
+          f"接口={_grace} 配置={_cfg_grace}")
+    check("status 下发 shutdown_on_page_close 布尔值",
+          isinstance(_st.get("shutdown_on_page_close"), bool),
+          f"实得 {_st.get('shutdown_on_page_close')!r}")
+
     # 中途停止：界面点「停止」后不该把剩下的块继续跑完
     calls = {"n": 0}
 

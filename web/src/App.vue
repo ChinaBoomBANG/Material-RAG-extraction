@@ -253,7 +253,7 @@ async function stopRun() {
   }
 }
 
-// ---- 页面生命周期：关页面 = 停服务（刷新由服务端 8 秒宽限期兜住）----
+// ---- 页面生命周期：关页面 = 停服务（刷新由服务端 web.shutdown_grace_s 宽限期兜住）----
 const sessionId = (window.crypto?.randomUUID)
   ? window.crypto.randomUUID()
   : `${Date.now()}-${Math.random().toString(16).slice(2)}`

@@ -20,6 +20,14 @@ const stopped = ref(false)
 
 const idx = computed(() => props.status?.index || {})
 
+// 服务生命周期参数从后端读，不写死秒数（改 config.yaml 后界面自动跟随）
+const webCfg = computed(() => props.status?.web || {})
+const graceSec = computed(() => {
+  const v = Number(webCfg.value.shutdown_grace_s)
+  return Number.isFinite(v) && v > 0 ? v : 15
+})
+const onPageClose = computed(() => webCfg.value.shutdown_on_page_close !== false)
+
 async function stopServer() {
   stopping.value = true
   try {
@@ -117,8 +125,14 @@ async function runIngest() {
       </header>
       <div class="flex flex-wrap items-center justify-between gap-3 p-3">
         <div class="text-[11.5px] leading-relaxed muted">
-          关闭本页 <b>8 秒后</b>服务自动退出（刷新不会，会被重新连上的页面取消）。<br />
-          正在进行的抽取会随之中断——这就是「关窗口 = 停掉这轮工作」。
+          <template v-if="onPageClose">
+            关闭本页 <b>{{ graceSec }}</b> 秒后服务自动退出（刷新不会，会被重新连上的页面取消）。<br />
+            <b>正在抽取时不会停</b>——任务会跑完，重开页面自动接管进度与结果。
+          </template>
+          <template v-else>
+            关页面<b>不会</b>停服务（<code>web.shutdown_on_page_close</code> 为 false），
+            需要手动点右侧按钮停止。
+          </template>
         </div>
         <button class="btn h-8 px-3" :disabled="stopping || stopped" @click="stopServer">
           {{ stopped ? '已停止' : (stopping ? '停止中…' : '立即停止服务') }}
