@@ -1,0 +1,109 @@
+# ============================================================
+# MaterialRAG 全局配置
+# 所有相对路径均以本文件所在目录（项目根）为基准。
+# 默认设计：LLM 走本机 LM Studio，向量化走本地 CPU，文档不出本机。
+# ============================================================
+
+project:
+  name: MaterialRAG
+  raw_dir: "data/raw_pdfs"        # 原始 PDF 存放处
+  index_dir: "data/index"         # 分块缓存 / 向量库 / BM25 索引
+  output_dir: "data/output"       # 抽取结果、预览表、diff 报告、Excel 备份
+  models_dir: "data/models"
+  schemas_dir: "data/schemas"       # 抽取模板（内置 + 用户自定义）
+
+# ---------------- 文本解析 ----------------
+ingest:
+  min_chunk_chars: 120            # 短于此长度的块丢弃
+  max_chunk_chars: 900            # 超长块二次切分
+  overlap_chars: 120              # 相邻块重叠字符
+  keep_tables_separate: true      # 表格单独成块（对成分-工艺-性能抽取关系重大）
+  table_min_rows: 2
+  drop_references: true           # 丢弃"参考文献"尾部段落
+
+# ---------------- 向量化 ----------------
+embedding:
+  # local = 本机 sentence-transformers 模型；lmstudio = 调 LM Studio 的 /v1/embeddings
+  backend: "local"
+  model_name: "BAAI/bge-small-zh-v1.5"
+  model_path: "data/models/bge-small-zh-v1.5"
+  query_prefix: "为这个句子生成表示以用于检索相关文章："   # bge-zh 官方推荐的查询前缀
+  batch_size: 32
+  device: "cpu"
+  normalize: true
+  # backend=lmstudio 时使用：
+  lmstudio_model: ""              # LM Studio 中已加载的 embedding 模型名，留空自动选取
+
+# ---------------- 检索 ----------------
+retrieval:
+  top_k_dense: 20
+  top_k_sparse: 20
+  top_k_final: 8
+  fusion: "rrf"                   # rrf | weighted
+  rrf_k: 60
+  rerank:
+    enabled: false                # 需另下 bge-reranker-base 后开启
+    model_name: "BAAI/bge-reranker-base"
+    model_path: "data/models/bge-reranker-base"
+
+# ---------------- 大模型 ----------------
+llm:
+  # openai_compat：任何 OpenAI 兼容服务。默认指向本机 LM Studio。
+  # 数据是否离开本机，由 base_url 决定，请自行确认。
+  backend: "openai_compat"
+  base_url: "http://127.0.0.1:1234/v1"
+  api_key: "lm-studio"            # LM Studio 不校验，占位即可
+  model: "google/gemma-4-12b-qat" # 留空 => 自动取 /v1/models 的第一个模型
+  gen:
+    temperature: 0.1
+    top_p: 0.9
+    max_tokens: 6144             # 预测值+实测值并列的表输出更长；2048 会截断成空记录
+    timeout_s: 900               # 6144 token 按 8.6 tok/s 约需 480s，留足余量
+    retries: 1                   # 抽取失败不反复重试，宁可报错也不要把整篇拖成几十分钟
+    # 推理型模型必须关掉思考：否则 token 全花在 reasoning 上，正文一个字都出不来
+    # （实测 gemma-4-12b-qat 用满 2048 token 思考、输出 0 字）。留空则不发送该字段。
+    reasoning_effort: "none"
+
+# ---------------- 数据抽取 ----------------
+extract:
+  verify_quotes: true             # 强制原文回链校验，不通过标记 unverified
+  strict_no_invention: true       # 原文没有即置空，禁止推断
+  max_evidence_chars: 400         # 单条证据引文最大长度
+  batch_chunks: 1                 # 每次送入模型的块数。12B 模型开 1：进程内只驻留一块，
+                                  # 既不会把内存/上下文挤爆，出错也容易定位到具体表格。
+  workers: 2                      # 并发请求数。同一批块实测：1 并发 9~10 条 / 418s，
+                                  # 2 并发 8 条 / 310s，3 并发 5~6 条 / 372s。
+                                  # 并发越高越快，但模型输出会变短、会少抽记录。
+                                  # 要最全 -> 1；要快 -> 2；>=3 明显丢数据，不推荐。
+  sec_per_chunk: 60               # 首次预估用（无实测值时）。跑过一次后以实测墙钟为准。
+  max_records_per_chunk: 20       # 单块最多输出多少条记录。数据集范围表动辄几十行，
+                                  # 不设上限时模型会一直生成直到撞 max_tokens，单块可达数分钟。
+  max_pages_per_run: 0            # 0 = 不限；>0 时只处理前 N 页（调试用）
+  # 表格抽取时附带「所在页正文」作参考上下文（只读，不改块、不影响索引与召回）。
+  # 原因：工艺条件/单位/样品说明常写在正文里，表格单独成块后模型看不到，
+  # 会把预测值当实测值、或让工艺字段全空。只对表格块生效，提示词里明确标注
+  # 「仅供理解，不得从中抽取」。
+  table_context:
+    enabled: true
+    max_chars: 400                # 每张表附带的同页正文上限；设 0 等同关闭
+  # 结构化输出（云端 API 支持时）会减少"输出带解释文字"导致的 JSON 解析失败；
+  # 本地服务不支持会自动去掉该参数重试，不影响兼容性。
+  json_object_mode: true
+
+# ---------------- Excel 写回 ----------------
+writeback:
+  backup: true                    # 写前 shutil.copy2 备份（强制开启）
+  dry_run_default: true           # 默认只产出预览与 diff，不落盘
+  allow_create_missing_columns: true
+  style:
+    header_bold: true
+    freeze_header: true
+
+# ---------------- Web ----------------
+web:
+  host: "127.0.0.1"
+  port: 8848
+  # 关掉浏览器页面就停服务：不用再留 stop_web.bat
+  shutdown_on_page_close: true
+  shutdown_grace_s: 15       # 关页面后等 15 秒；刷新会在 hello 时取消，不会误杀
+  idle_timeout_s: 180        # 页面被强杀/没发 bye 时的兜底：无心跳这么久就自停

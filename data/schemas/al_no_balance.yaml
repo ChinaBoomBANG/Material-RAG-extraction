@@ -1,0 +1,761 @@
+name: 铝合金无余量模板
+version: 1
+key_field: alloy
+description: 基于内置 94 字段模板，删除 Al/Al_pred（铝合金中 Al 为余量，文献通常不列具体值）。用于铝合金文献抽取，避免模型编造余量元素含量。
+groups:
+- key: meta
+  label: 标识
+  bucket: meta
+  fields:
+  - key: alloy
+    label: 合金牌号
+    type: text
+    aliases:
+    - 合金
+    - 牌号
+    - 材料
+    - 合金名称
+    - alloy
+    - AA
+    - designation
+- key: composition
+  label: 化学成分
+  bucket: composition
+  fields:
+  - key: Si
+    label: Si
+    type: number
+    unit: wt.%
+    aliases:
+    - 硅
+    - Silicon
+  - key: Mg
+    label: Mg
+    type: number
+    unit: wt.%
+    aliases:
+    - 镁
+    - Magnesium
+  - key: Cu
+    label: Cu
+    type: number
+    unit: wt.%
+    aliases:
+    - 铜
+    - Copper
+  - key: Fe
+    label: Fe
+    type: number
+    unit: wt.%
+    aliases:
+    - 铁
+    - Iron
+  - key: Mn
+    label: Mn
+    type: number
+    unit: wt.%
+    aliases:
+    - 锰
+    - Manganese
+  - key: Zn
+    label: Zn
+    type: number
+    unit: wt.%
+    aliases:
+    - 锌
+    - Zinc
+  - key: Cr
+    label: Cr
+    type: number
+    unit: wt.%
+    aliases:
+    - 铬
+    - Chromium
+  - key: Ti
+    label: Ti
+    type: number
+    unit: wt.%
+    aliases:
+    - 钛
+    - Titanium
+  - key: Zr
+    label: Zr
+    type: number
+    unit: wt.%
+    aliases:
+    - 锆
+    - Zirconium
+  - key: Ni
+    label: Ni
+    type: number
+    unit: wt.%
+    aliases:
+    - 镍
+    - Nickel
+  - key: Sr
+    label: Sr
+    type: number
+    unit: wt.%
+    aliases:
+    - 锶
+    - Strontium
+  - key: B
+    label: B
+    type: number
+    unit: wt.%
+    aliases:
+    - 硼
+    - Boron
+  - key: Na
+    label: Na
+    type: number
+    unit: wt.%
+    aliases:
+    - 钠
+    - Sodium
+  - key: Ca
+    label: Ca
+    type: number
+    unit: wt.%
+    aliases:
+    - 钙
+    - Calcium
+  - key: Pb
+    label: Pb
+    type: number
+    unit: wt.%
+    aliases:
+    - 铅
+    - Lead
+  - key: Sn
+    label: Sn
+    type: number
+    unit: wt.%
+    aliases:
+    - 锡
+    - Tin
+  - key: V
+    label: V
+    type: number
+    unit: wt.%
+    aliases:
+    - 钒
+    - Vanadium
+  - key: Sc
+    label: Sc
+    type: number
+    unit: wt.%
+    aliases:
+    - 钪
+    - Scandium
+  - key: Li
+    label: Li
+    type: number
+    unit: wt.%
+    aliases:
+    - 锂
+    - Lithium
+  - key: Ag
+    label: Ag
+    type: number
+    unit: wt.%
+    aliases:
+    - 银
+    - Silver
+  - key: RE
+    label: RE
+    type: number
+    unit: wt.%
+    aliases:
+    - 稀土
+    - Rare Earth
+    - La
+    - Ce
+    - Y
+  - key: Others
+    label: 其他/杂质
+    type: number
+    unit: wt.%
+    aliases:
+    - Others
+    - Impurities
+    - 杂质
+    - 其他
+  - key: Si_pred
+    label: Si 预测值
+    type: number
+    unit: wt.%
+    aliases:
+    - 预测Si
+    - predicted Si
+  - key: Mg_pred
+    label: Mg 预测值
+    type: number
+    unit: wt.%
+    aliases:
+    - 预测Mg
+    - predicted Mg
+  - key: Cu_pred
+    label: Cu 预测值
+    type: number
+    unit: wt.%
+    aliases:
+    - 预测Cu
+    - predicted Cu
+  - key: Fe_pred
+    label: Fe 预测值
+    type: number
+    unit: wt.%
+    aliases:
+    - 预测Fe
+    - predicted Fe
+  - key: Mn_pred
+    label: Mn 预测值
+    type: number
+    unit: wt.%
+    aliases:
+    - 预测Mn
+    - predicted Mn
+  - key: Zn_pred
+    label: Zn 预测值
+    type: number
+    unit: wt.%
+    aliases:
+    - 预测Zn
+    - predicted Zn
+  - key: Cr_pred
+    label: Cr 预测值
+    type: number
+    unit: wt.%
+    aliases:
+    - 预测Cr
+    - predicted Cr
+  - key: Ti_pred
+    label: Ti 预测值
+    type: number
+    unit: wt.%
+    aliases:
+    - 预测Ti
+    - predicted Ti
+  - key: Zr_pred
+    label: Zr 预测值
+    type: number
+    unit: wt.%
+    aliases:
+    - 预测Zr
+    - predicted Zr
+  - key: Ni_pred
+    label: Ni 预测值
+    type: number
+    unit: wt.%
+    aliases:
+    - 预测Ni
+    - predicted Ni
+  - key: Sr_pred
+    label: Sr 预测值
+    type: number
+    unit: wt.%
+    aliases:
+    - 预测Sr
+    - predicted Sr
+  - key: B_pred
+    label: B 预测值
+    type: number
+    unit: wt.%
+    aliases:
+    - 预测B
+    - predicted B
+  - key: Na_pred
+    label: Na 预测值
+    type: number
+    unit: wt.%
+    aliases:
+    - 预测Na
+    - predicted Na
+  - key: Ca_pred
+    label: Ca 预测值
+    type: number
+    unit: wt.%
+    aliases:
+    - 预测Ca
+    - predicted Ca
+  - key: Pb_pred
+    label: Pb 预测值
+    type: number
+    unit: wt.%
+    aliases:
+    - 预测Pb
+    - predicted Pb
+  - key: Sn_pred
+    label: Sn 预测值
+    type: number
+    unit: wt.%
+    aliases:
+    - 预测Sn
+    - predicted Sn
+  - key: V_pred
+    label: V 预测值
+    type: number
+    unit: wt.%
+    aliases:
+    - 预测V
+    - predicted V
+  - key: Sc_pred
+    label: Sc 预测值
+    type: number
+    unit: wt.%
+    aliases:
+    - 预测Sc
+    - predicted Sc
+  - key: Li_pred
+    label: Li 预测值
+    type: number
+    unit: wt.%
+    aliases:
+    - 预测Li
+    - predicted Li
+  - key: Ag_pred
+    label: Ag 预测值
+    type: number
+    unit: wt.%
+    aliases:
+    - 预测Ag
+    - predicted Ag
+  - key: RE_pred
+    label: RE 预测值
+    type: number
+    unit: wt.%
+    aliases:
+    - 预测RE
+    - predicted RE
+  - key: Others_pred
+    label: 其他/杂质 预测值
+    type: number
+    unit: wt.%
+    aliases:
+    - 预测其他/杂质
+    - predicted Others
+- key: process
+  label: 工艺
+  bucket: process
+  fields:
+  - key: casting
+    label: 铸造/制备方式
+    type: text
+    aliases:
+    - 铸造
+    - DC casting
+    - 半连续铸造
+    - casting
+    - 熔炼
+    - 制备
+  - key: homogenization_temp
+    label: 均匀化温度
+    type: number
+    unit: °C
+    aliases:
+    - 均匀化温度
+    - homogenization temperature
+    - Homogenizing
+  - key: homogenization_time
+    label: 均匀化时间
+    type: number
+    unit: h
+    aliases:
+    - 均匀化时间
+    - homogenization time
+  - key: solution_temp
+    label: 固溶温度
+    type: number
+    unit: °C
+    aliases:
+    - 固溶温度
+    - solution temperature
+    - solution treatment
+    - 固溶处理
+  - key: solution_time
+    label: 固溶时间
+    type: number
+    unit: h
+    aliases:
+    - 固溶时间
+    - solution time
+    - 固溶保温
+  - key: quench
+    label: 淬火方式/冷速
+    type: text
+    aliases:
+    - 淬火
+    - quenching
+    - water quench
+    - 水淬
+    - 空冷
+    - 冷却速率
+    - cooling rate
+  - key: aging_temp
+    label: 时效温度
+    type: number
+    unit: °C
+    aliases:
+    - 时效温度
+    - aging temperature
+    - artificial aging
+    - 人工时效
+    - T6
+    - T5
+  - key: aging_time
+    label: 时效时间
+    type: number
+    unit: h
+    aliases:
+    - 时效时间
+    - aging time
+    - 时效保温
+  - key: aging_stage2_temp
+    label: 二级时效温度
+    type: number
+    unit: °C
+    aliases:
+    - 二级时效温度
+    - second stage aging
+    - 双级时效
+  - key: aging_stage2_time
+    label: 二级时效时间
+    type: number
+    unit: h
+    aliases:
+    - 二级时效时间
+    - second step aging time
+  - key: pre_aging
+    label: 预时效
+    type: text
+    aliases:
+    - 预时效
+    - pre-aging
+    - preaging
+    - 自然时效
+    - natural aging
+  - key: hot_deform_temp
+    label: 热变形温度
+    type: number
+    unit: °C
+    aliases:
+    - 热变形温度
+    - 热加工温度
+    - extrusion temperature
+    - 挤压温度
+    - rolling temperature
+  - key: extrusion_ratio
+    label: 挤压比
+    type: number
+    aliases:
+    - 挤压比
+    - extrusion ratio
+  - key: rolling_reduction
+    label: 轧制压下量
+    type: number
+    unit: '%'
+    aliases:
+    - 轧制压下量
+    - rolling reduction
+    - 压下率
+  - key: cold_work
+    label: 冷变形量
+    type: number
+    unit: '%'
+    aliases:
+    - 冷变形量
+    - cold work
+    - 冷加工率
+    - 预变形
+  - key: ramp_rate
+    label: 升温速率
+    type: number
+    unit: °C/min
+    aliases:
+    - 升温速率
+    - heating rate
+    - 加热速率
+- key: microstructure
+  label: 组织
+  bucket: microstructure
+  fields:
+  - key: grain_size
+    label: 晶粒尺寸
+    type: number
+    unit: μm
+    aliases:
+    - 晶粒尺寸
+    - grain size
+    - 平均晶粒
+    - 晶粒度
+  - key: grain_morphology
+    label: 晶粒形貌
+    type: text
+    aliases:
+    - 晶粒形貌
+    - grain morphology
+    - 纤维组织
+    - 等轴晶
+    - 柱状晶
+  - key: precipitate_type
+    label: 析出相类型
+    type: text
+    aliases:
+    - 析出相
+    - precipitate
+    - β''
+    - β'
+    - Q'
+    - GP zone
+    - GP区
+    - Mg2Si
+    - Al3Zr
+  - key: precipitate_size
+    label: 析出相尺寸
+    type: number
+    unit: nm
+    aliases:
+    - 析出相尺寸
+    - precipitate size
+    - 析出相直径
+    - 粒子尺寸
+  - key: precipitate_fraction
+    label: 析出相体积分数
+    type: number
+    unit: '%'
+    aliases:
+    - 体积分数
+    - volume fraction
+    - 面积分数
+    - areal fraction
+  - key: recrystallization
+    label: 再结晶分数
+    type: number
+    unit: '%'
+    aliases:
+    - 再结晶分数
+    - recrystallization fraction
+    - 再结晶比例
+  - key: texture
+    label: 织构
+    type: text
+    aliases:
+    - 织构
+    - texture
+    - 取向
+    - Brass
+    - Cube
+    - Goss
+  - key: dislocation_density
+    label: 位错密度
+    type: number
+    unit: m^-2
+    aliases:
+    - 位错密度
+    - dislocation density
+  - key: pfz_width
+    label: PFZ 宽度
+    type: number
+    unit: nm
+    aliases:
+    - PFZ
+    - 无沉淀析出带
+    - precipitate free zone
+  - key: second_phase
+    label: 第二相/夹杂
+    type: text
+    aliases:
+    - 第二相
+    - second phase
+    - 夹杂物
+    - inclusion
+    - AlFeSi
+    - Mg2Si
+- key: properties
+  label: 力学性能
+  bucket: properties
+  fields:
+  - key: YS
+    label: 屈服强度 Rp0.2
+    type: number
+    unit: MPa
+    aliases:
+    - 屈服强度
+    - yield strength
+    - Rp0.2
+    - YS
+    - 0.2% offset
+  - key: UTS
+    label: 抗拉强度 Rm
+    type: number
+    unit: MPa
+    aliases:
+    - 抗拉强度
+    - tensile strength
+    - UTS
+    - Rm
+    - σb
+  - key: elongation
+    label: 延伸率 A
+    type: number
+    unit: '%'
+    aliases:
+    - 延伸率
+    - elongation
+    - 断后伸长率
+    - δ
+    - A50mm
+  - key: hardness_HV
+    label: 硬度 HV
+    type: number
+    unit: HV
+    aliases:
+    - 维氏硬度
+    - hardness
+    - HV
+    - Vickers
+    - 显微硬度
+  - key: hardness_HB
+    label: 硬度 HB
+    type: number
+    unit: HB
+    aliases:
+    - 布氏硬度
+    - HB
+    - Brinell
+  - key: E
+    label: 弹性模量
+    type: number
+    unit: GPa
+    aliases:
+    - 弹性模量
+    - Young's modulus
+    - modulus
+    - E
+  - key: density
+    label: 密度
+    type: number
+    unit: g/cm³
+    aliases:
+    - 密度
+    - density
+  - key: conductivity
+    label: 导电率
+    type: number
+    unit: '%IACS'
+    aliases:
+    - 导电率
+    - conductivity
+    - IACS
+    - 电导率
+  - key: thermal_conductivity
+    label: 热导率
+    type: number
+    unit: W/(m·K)
+    aliases:
+    - 热导率
+    - thermal conductivity
+  - key: fatigue
+    label: 疲劳强度
+    type: number
+    unit: MPa
+    aliases:
+    - 疲劳强度
+    - fatigue strength
+    - fatigue limit
+    - 疲劳极限
+  - key: fracture_toughness
+    label: 断裂韧性
+    type: number
+    unit: MPa·m^0.5
+    aliases:
+    - 断裂韧性
+    - fracture toughness
+    - KIC
+  - key: IGC
+    label: 晶间腐蚀
+    type: text
+    aliases:
+    - 晶间腐蚀
+    - intergranular corrosion
+    - IGC
+  - key: EXCO
+    label: 剥落腐蚀
+    type: text
+    aliases:
+    - 剥落腐蚀
+    - exfoliation corrosion
+    - EXCO
+  - key: corrosion_rate
+    label: 腐蚀速率
+    type: number
+    unit: mm/a
+    aliases:
+    - 腐蚀速率
+    - corrosion rate
+  - key: test_temp
+    label: 性能测试温度
+    type: number
+    unit: °C
+    aliases:
+    - 测试温度
+    - test temperature
+    - 室温
+    - RT
+    - ambient
+  - key: test_condition
+    label: 性能测试条件
+    type: text
+    aliases:
+    - 应变速率
+    - strain rate
+    - 拉伸速率
+    - crosshead speed
+    - 测试标准
+    - ASTM
+  - key: UTS_pred
+    label: 抗拉强度 预测值
+    type: number
+    unit: MPa
+    aliases:
+    - 预测抗拉强度
+    - UTS predicted
+    - predicted UTS
+    - UTS-Pre
+    - 抗拉强度预测
+  - key: YS_pred
+    label: 屈服强度 预测值
+    type: number
+    unit: MPa
+    aliases:
+    - 预测屈服强度
+    - YS predicted
+    - predicted YS
+    - YS-Pre
+    - 屈服强度预测
+  - key: elongation_pred
+    label: 延伸率 预测值
+    type: number
+    unit: '%'
+    aliases:
+    - 预测延伸率
+    - elongation predicted
+    - predicted elongation
+    - EL-Pre
+  - key: hardness_HB_pred
+    label: 硬度 HB 预测值
+    type: number
+    unit: HB
+    aliases:
+    - 预测硬度
+    - HB predicted
+    - predicted hardness
+  - key: EC_pred
+    label: 导电率 预测值
+    type: number
+    unit: '%IACS'
+    aliases:
+    - 预测导电率
+    - EC predicted
+    - predicted conductivity

@@ -1,0 +1,150 @@
+name: 铝合金精简模板
+version: 1
+key_field: alloy
+description: 17 字段精简模板：用于验证动态 Schema，比内置 94 字段更短，单块抽取更快。
+groups:
+- key: material
+  label: 材料
+  bucket: meta
+  fields:
+  - key: alloy
+    label: 合金牌号
+    type: text
+    required: true
+    aliases:
+    - 牌号
+    - designation
+    - AA
+    hint: 原文怎么写就怎么抄，如 6061-T6、A1、D3、6013
+- key: chemical
+  label: 化学成分
+  bucket: composition
+  fields:
+  - key: Si
+    label: Si
+    type: number
+    unit: wt.%
+    aliases:
+    - 硅
+    - Silicon
+  - key: Fe
+    label: Fe
+    type: number
+    unit: wt.%
+    aliases:
+    - 铁
+    - Iron
+  - key: Cu
+    label: Cu
+    type: number
+    unit: wt.%
+    aliases:
+    - 铜
+    - Copper
+  - key: Mn
+    label: Mn
+    type: number
+    unit: wt.%
+    aliases:
+    - 锰
+    - Manganese
+  - key: Mg
+    label: Mg
+    type: number
+    unit: wt.%
+    aliases:
+    - 镁
+    - Magnesium
+  - key: Cr
+    label: Cr
+    type: number
+    unit: wt.%
+    aliases:
+    - 铬
+    - Chromium
+  - key: Zn
+    label: Zn
+    type: number
+    unit: wt.%
+    aliases:
+    - 锌
+    - Zinc
+  - key: Ti
+    label: Ti
+    type: number
+    unit: wt.%
+  - key: Ni
+    label: Ni
+    type: number
+    unit: wt.%
+  - key: Sc
+    label: Sc
+    type: number
+    unit: wt.%
+  - key: Zr
+    label: Zr
+    type: number
+    unit: wt.%
+  - key: RE
+    label: RE(其他元素)
+    type: text
+    required: false
+    hint: 模板字段清单之外的成分列（元素）全部归到这里，格式「元素=数值」，多个用英文分号分隔，如 Be=0.05; Sr=0.01；没有清单外元素就留空
+- key: process
+  label: 工艺
+  bucket: process
+  fields:
+  - key: extrusion_temp
+    label: 挤压温度
+    type: number
+    unit: °C
+    aliases:
+    - EXT
+    - extrusion temperature
+  - key: extrusion_ratio
+    label: 挤压比
+    type: number
+    aliases:
+    - EXR
+    - extrusion ratio
+  - key: solution_temp
+    label: 固溶温度
+    type: number
+    unit: °C
+  - key: aging_temp
+    label: 时效温度
+    type: number
+    unit: °C
+  - key: aging_time
+    label: 时效时间
+    type: number
+    unit: h
+- key: props
+  label: 力学性能
+  bucket: properties
+  fields:
+  - key: UTS
+    label: 抗拉强度
+    type: number
+    unit: MPa
+    aliases:
+    - Rm
+    - tensile strength
+  - key: YS
+    label: 屈服强度
+    type: number
+    unit: MPa
+    aliases:
+    - Rp0.2
+    - yield strength
+  - key: elongation
+    label: 延伸率
+    type: number
+    unit: '%'
+    aliases:
+    - A
+    - EL
+  - key: hardness_HB
+    label: 硬度 HB
+    type: number
+    unit: HB

@@ -1,0 +1,39 @@
+# ============================================================
+# MaterialRAG 项目依赖（干净版，只含本项目真正用到的库）
+#
+# 与 requirements_freeze.txt 的区别：
+#   freeze 版是托管 venv 的全量快照（含 WorkBuddy 其他功能混入的
+#   python-docx / python-pptx / scikit-learn / jieba / pypdf 等），
+#   不适合移植。本文件只保留本项目直接依赖，版本号与已验证环境一致。
+#
+# 重要 —— torch 必须单独装 CPU 版（PyPI 上的同名包是约 2GB 的 CUDA 版）：
+#   pip install torch==2.14.1 --index-url https://download.pytorch.org/whl/cpu
+#   pip install -r requirements.txt
+#
+# 兼容性说明（3.13 → 3.12）：以下全部有 cp312 预编译 wheel，
+# 从 3.13 降到 3.12 反而更稳（wheel 覆盖更全）。已实测 torch/transformers/
+# pandas/numpy/pymupdf 在 3.12 下的 wheel 均存在。
+# ============================================================
+
+# --- PDF 解析 ---
+pymupdf==1.28.2
+
+# --- 向量与检索 ---
+numpy==2.5.3
+transformers==5.20.1
+rank-bm25==0.2.2
+# torch 不列在这里 —— 见文件头，须用 --index-url 单独装 CPU 版
+
+# --- Excel 读写 ---
+pandas==3.0.6
+openpyxl==3.1.5
+xlsxwriter==3.2.9
+
+# --- Web 服务与配置 ---
+fastapi==0.143.3
+uvicorn[standard]==0.54.0
+pydantic==2.14.1
+PyYAML==6.0.3
+
+# --- 模型下载（scripts/fetch_embedding_model.py 用）---
+huggingface_hub==1.33.0
