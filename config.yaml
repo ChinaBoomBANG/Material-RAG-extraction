@@ -23,16 +23,25 @@ ingest:
 
 # ---------------- 向量化 ----------------
 embedding:
-  # local = 本机 sentence-transformers 模型；lmstudio = 调 LM Studio 的 /v1/embeddings
-  backend: "local"
-  model_name: "BAAI/bge-small-zh-v1.5"
+  # local = 本机 sentence-transformers 模型（需要 torch，会被系统的应用控制策略拦）；
+  # lmstudio = 调 LM Studio 的 /v1/embeddings（不需要 torch，推荐）
+  backend: "lmstudio"
+  model_name: "BAAI/bge-small-zh-v1.5"     # 仅 local 后端使用
   model_path: "data/models/bge-small-zh-v1.5"
-  query_prefix: "为这个句子生成表示以用于检索相关文章："   # bge-zh 官方推荐的查询前缀
-  batch_size: 32
-  device: "cpu"
-  normalize: true
-  # backend=lmstudio 时使用：
-  lmstudio_model: ""              # LM Studio 中已加载的 embedding 模型名，留空自动选取
+  device: "cpu"                             # 仅 local 后端使用
+  batch_size: 32                            # 仅 local 后端使用
+  normalize: true                           # 输出统一做 L2 归一化（dense_search 靠内积算余弦）
+  # 任务前缀：nomic 要求查询/文档用不同前缀；换模型时这两个值要一起改
+  # （bge-zh 系列用中文前缀；bge-m3 不需要前缀，留空即可）
+  query_prefix: "search_query: "
+  doc_prefix: "search_document: "
+  # ---- backend=lmstudio 时使用 ----
+  lmstudio_model: "text-embedding-nomic-embed-text-v1.5"  # 留空则自动取第一个 embedding 模型
+  # 独立地址与密钥：留空则沿用 llm.base_url / llm.api_key。
+  # 填上之后，把 llm 切到云端 API 也不会把向量化请求带走（推荐保持本机）。
+  base_url: "http://127.0.0.1:1234/v1"
+  api_key: ""
+  timeout_s: 180
 
 # ---------------- 检索 ----------------
 retrieval:
@@ -51,9 +60,9 @@ llm:
   # openai_compat：任何 OpenAI 兼容服务。默认指向本机 LM Studio，也可自行配置云端大模型。
   # 数据是否离开本机，由 base_url 决定，请自行确认。
   backend: "openai_compat"
-  base_url: ""           # 改成服务商的 OpenAI 兼容地址
-  api_key: ""            # LM Studio 不校验，占位即可
-  model: "" # 留空 => 自动取 /v1/models 的第一个模型
+  base_url: "http://127.0.0.1:1234/v1"        # 必须带 /v1（OpenAI 兼容路径）；云端填服务商的对应地址
+  api_key: "light"            # LM Studio 不校验，占位即可
+  model: "google/gemma-4-12b-qat" # 留空 => 自动取 /v1/models 的第一个模型
   gen:                   # 配置云端大模型时，这里的参数可修改，按云端模型上限修改
     temperature: 0.1
     top_p: 0.9

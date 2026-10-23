@@ -72,11 +72,13 @@ RAG/
 
 ## 二、快速开始
 
-> **首次运行请先配置 `config.yaml` 的 `llm` 段。**
-> 仓库里的 `base_url`、`api_key`、`model` 都留成了空占位，必须填上你实际使用的服务才能运行：
-> 本地 LM Studio 填 `http://127.0.0.1:1234/v1`、`api_key` 填任意值（它不校验）、`model` 填已加载的模型名；
-> 用云端则填服务商的 OpenAI 兼容地址与密钥，并**清空 `gen.reasoning_effort`**（那是 LM Studio 专用参数，
-> 云端 API 收到它会返回 400）。改动后重启服务生效。
+> **首次运行请先确认 `config.yaml` 的 `llm` 与 `embedding` 两段。**
+> 默认配置指向**本地 LM Studio**（`base_url: http://127.0.0.1:1234/v1`，`api_key` 任意值、不校验），
+> 因此需要先在 LM Studio 里加载一个对话模型，并把 `llm.model` 改成该模型名；`embedding` 默认也走
+> LM Studio，需要再加载一个 embedding 模型并填进 `embedding.lmstudio_model`。
+> 若改用云端 API：填服务商的 OpenAI 兼容地址与密钥（**记得带 `/v1`**），并**清空 `gen.reasoning_effort`**
+> ——那是 LM Studio 专用参数，云端收到会返回 400。改动后重启服务生效。
+> 换 embedding 模型后必须重建索引（维度会变）。
 
 ### 0. 准备（只需一次）
 
@@ -321,7 +323,11 @@ extract:
 | --- | --- |
 | `ingest.max_chunk_chars` | 切块上限，学术正文建议 900 |
 | `ingest.keep_tables_separate` | 表格单独成块，对成分/性能抽取至关重要，保持 true |
-| `embedding.backend` | `local`（本机模型）/ `lmstudio`（调 LM Studio 的 embedding）/ `none`（纯 BM25） |
+| `embedding.backend` | `local`（本机 transformers，**需要 torch**）/ `lmstudio`（调 LM Studio 的 `/v1/embeddings`，**不需要 torch**，默认）/ `none`（纯 BM25） |
+| `embedding.lmstudio_model` | LM Studio 里加载的 embedding 模型名（留空自动取第一个） |
+| `embedding.base_url` / `api_key` | **独立于 `llm`** 的连接配置；留空则沿用 `llm` 的同名项。填上后把 `llm` 切到云端也不会把向量化带走 |
+| `embedding.query_prefix` / `doc_prefix` | 任务前缀：nomic 需 `search_query: ` / `search_document: `；bge-m3 不需要（留空）；bge-zh 用中文前缀 |
+| `embedding.batch_size` | 分批大小。`lmstudio` 后端会按它分批请求，避免整库一次性发送 |
 | `retrieval.fusion` | `rrf`（默认，无需调参）/ `weighted` |
 | `retrieval.rerank.enabled` | 开启前需另下 `bge-reranker-base` 到 `data/models/` |
 | `extract.batch_chunks` | 每次送模型的块数；本地 12B 建议 1，云端 API 可提到 4~8 |
@@ -355,7 +361,7 @@ Excel 备份/写入/逐格 diff、无表格时的终端渲染。**全部不依�
 
 | 环节 | 实测 | 结论 |
 | --- | --- | --- |
-| embedding（bge-small-zh） | 约 45~49 块/秒 | 一篇 20 页论文约 100~300 块，索引 2~7 秒/篇，**索引无需分批** |
+| embedding（nomic-embed-text，经 LM Studio） | **52 条/秒**（实测）；重建 10916 块用 161 秒 | 编码不再是瓶颈；`local` 后端（bge-small-zh）约 45~49 块/秒 |
 | 向量内存 | 每块约 2 KB | 10 万块约 200 MB，32 GB 内存不是瓶颈 |
 | 混合检索 | 毫秒级（numpy 矩阵乘 + BM25） | 几千篇无压力 |
 | 数据抽取 | **单块 9~211 秒**（5 篇文献 / 30 个表格块实测） | **真正耗时的环节，且长尾极重** |
@@ -384,11 +390,15 @@ Excel 备份/写入/逐格 diff、无表格时的终端渲染。**全部不依�
 3. **中文按字分词**。BM25 通道对 2~4 字材料术语够用，但不如专业分词器细腻；
    语义部分由向量通道兜底。
 4. **重排模型默认关闭**，开启需额外下载约 1.1 GB 的 `bge-reranker-base`。
-5. **向量化只取每块前 512 token**（`embedder` 里 `max_length=512`）。块上限是 900 字符，
-   超长块的后半段没有进入向量；检索命中靠前半段与 BM25 兜底。要覆盖全块需调大该值并重建索引。
-6. **写 Excel 不是原子操作**：`openpyxl` 直接保存到目标文件，保存中途崩溃可能损坏原表。
+5. **`local` 后端的向量化只取每块前 512 token**（`max_length=512`），超长块后半段不进向量。
+   `lmstudio` 后端不受此限（nomic 支持 8192 token，整块都进向量）——这也是默认改用它的原因之一。
+6. **跨语言检索不可靠**：实测 nomic 与 bge-m3(GGUF) 的「中文查询→英文文档」区分度都接近 0，
+   中文提问依赖 `ask()` 里的自动翻译（`_translate_query`）先把问题转成英文再检索。
+7. **更换 embedding 模型必须重建索引**（维度或语义空间变了，旧向量作废）。
+   只重算向量不必重新解析 PDF：读出 `chunks.jsonl` → 重新编码 → 覆盖 `vectors.npy`。
+8. **写 Excel 不是原子操作**：`openpyxl` 直接保存到目标文件，保存中途崩溃可能损坏原表。
    默认会先备份到 `data/output/backups/`，可用备份恢复。
-7. **CPU 环境**。向量化很快（bge-small，512 维），瓶颈在 LLM 生成本身，
+9. **CPU 环境**。向量化用 LM Studio 跑 nomic（768 维，52 条/秒），瓶颈在 LLM 生成本身，
    取决于 LM Studio 里加载的模型大小；换云端 API 后瓶颈转为网络与 token 计费。
 
 ---

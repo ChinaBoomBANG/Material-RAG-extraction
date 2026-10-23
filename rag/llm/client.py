@@ -132,7 +132,15 @@ class LLMClient:
         try:
             return resp["choices"][0]["message"]["content"]
         except (KeyError, IndexError) as e:
-            raise LLMError(f"返回结构异常：{json.dumps(resp, ensure_ascii=False)[:400]}") from e
+            # 带上实际请求地址：最常见的坑是 base_url 少了 /v1，
+            # 服务端会回 "Unexpected endpoint or method"，光看响应体根本看不出原因。
+            hint = ""
+            if not url.rstrip("/").endswith("/v1") and "/v1/" not in url:
+                hint = (f"（提示：base_url={self.base_url!r} 似乎缺少 /v1，"
+                        f"OpenAI 兼容服务通常要求 http://host:port/v1）")
+            raise LLMError(
+                f"返回结构异常：{json.dumps(resp, ensure_ascii=False)[:400]}"
+                f"\n请求地址：{url}{hint}") from e
 
     def chat_json(self, user: str, system: str = "", retry_hint: str = "",
                   response_format: dict | None = None) -> dict:

@@ -1,7 +1,8 @@
 ' MaterialRAG silent launcher (double-click to run)
 ' Starts the local server in the background with pythonw (no console window),
-' then opens the browser. Log: data\output\web.log
-' Stop: just close the browser page (the server exits ~8s later).
+' then opens the browser once the server actually answers. Log: data\output\web.log
+' Stop: just close the browser page (idle -> exits after web.shutdown_grace_s,
+'       15s by default; it will NOT stop while an extraction is running).
 Option Explicit
 
 Dim fso, sh, root, py, logDir, logFile, q, cmd
@@ -30,6 +31,29 @@ logFile = logDir & "\web.log"
 cmd = q & py & q & " -m rag.cli serve --port 8848 --no-browser --log-file " & q & logFile & q
 sh.Run cmd, 0, False
 
-' Give the server ~2.5s to boot, then open the browser
-WScript.Sleep 2500
+' Poll /api/status until the server answers (max 30s), then open the browser.
+' A fixed 2.5s sleep used to fire too early: the index takes a few seconds to
+' load, so the browser hit "127.0.0.1 refused to connect" and only worked after
+' a manual refresh. Proxy lookups are disabled explicitly, because a system-wide
+' proxy would otherwise intercept even 127.0.0.1 and report a false negative.
+Dim waited
+waited = 0
+Do While waited < 30000
+    If ServerReady() Then Exit Do
+    WScript.Sleep 300
+    waited = waited + 300
+Loop
 sh.Run "http://127.0.0.1:8848/", 1, False
+
+Function ServerReady()
+    ' Returns True when the local server responds; never uses a proxy.
+    On Error Resume Next
+    Dim w
+    Set w = CreateObject("WinHttp.WinHttpRequest.5.1")
+    w.SetAutoLogProxy 0
+    w.Open "GET", "http://127.0.0.1:8848/api/status", False
+    w.Send
+    ServerReady = (Err.Number = 0)
+    Err.Clear
+    On Error GoTo 0
+End Function

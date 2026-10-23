@@ -63,6 +63,11 @@ class Embedder:
     # ---------------------------------------------------------- 编码
 
     def encode_documents(self, texts: list[str]) -> np.ndarray:
+        # 部分模型（如 nomic-embed-text）要求文档侧带任务前缀才能发挥最佳效果；
+        # 前缀为空时行为与之前完全一致。
+        prefix = self.conf["embedding"].get("doc_prefix", "") or ""
+        if prefix:
+            texts = [prefix + t for t in texts]
         return self._encode(texts)
 
     def encode_query(self, text: str) -> np.ndarray:
@@ -102,21 +107,46 @@ class Embedder:
 
     def _encode_lmstudio(self, texts: list[str]) -> np.ndarray:
         llm = self.conf["llm"]
-        base = llm["base_url"].rstrip("/")
-        model = self.conf["embedding"].get("lmstudio_model") or self._pick_embedding_model(base)
-        body = json.dumps({"model": model, "input": texts}).encode("utf-8")
-        req = urllib.request.Request(
-            f"{base}/embeddings", data=body,
-            headers={"Content-Type": "application/json",
-                     "Authorization": f"Bearer {llm.get('api_key', 'lm-studio')}"},
-            method="POST")
-        try:
-            with urllib.request.urlopen(req, timeout=120) as r:
-                data = json.load(r)
-        except urllib.error.URLError as e:
-            raise RuntimeError(f"LM Studio embedding 调用失败：{e}") from e
-        vecs = np.asarray([d["embedding"] for d in data["data"]], dtype=np.float32)
-        self.dim = vecs.shape[1]
+        emb = self.conf["embedding"]
+        # embedding 有自己的地址与密钥：留空时沿用 llm 的（向后兼容）。
+        # 这样把 llm.base_url 改成云端 API 时，向量化仍然留在本机，不会跟着上云。
+        base = str(emb.get("base_url") or llm["base_url"]).rstrip("/")
+        api_key = emb.get("api_key") or llm.get("api_key", "lm-studio")
+        model = emb.get("lmstudio_model") or self._pick_embedding_model(base)
+        timeout = int(emb.get("timeout_s", 120) or 120)
+        # 必须分批：整库上万块一次性发送会产生十几 MB 的请求体，
+        # 服务端要么超时要么直接拒收。
+        bs = max(1, int(emb.get("batch_size", 32) or 32))
+
+        parts: list[np.ndarray] = []
+        total = len(texts)
+        for i in range(0, total, bs):
+            batch = texts[i:i + bs]
+            body = json.dumps({"model": model, "input": batch}).encode("utf-8")
+            req = urllib.request.Request(
+                f"{base}/embeddings", data=body,
+                headers={"Content-Type": "application/json",
+                         "Authorization": f"Bearer {api_key}"},
+                method="POST")
+            try:
+                with urllib.request.urlopen(req, timeout=timeout) as r:
+                    data = json.load(r)
+            except urllib.error.URLError as e:
+                raise RuntimeError(
+                    f"embedding 服务调用失败（{base}，模型 {model}，"
+                    f"第 {i + 1}~{i + len(batch)} 条）：{e}") from e
+            parts.append(np.asarray([d["embedding"] for d in data["data"]],
+                                    dtype=np.float32))
+            if total > bs:
+                print(f"  embedding {min(i + bs, total)}/{total}", flush=True)
+
+        vecs = np.vstack(parts) if parts else np.zeros((0, self.dim), dtype=np.float32)
+        # 必须归一化：dense_search 只归一化查询向量、直接做内积，
+        # 服务端若不返回单位向量，点积就不再等于余弦，排序会被模长带偏。
+        if bool(emb.get("normalize", True)):
+            norms = np.linalg.norm(vecs, axis=1, keepdims=True)
+            vecs = vecs / np.clip(norms, 1e-12, None)
+        self.dim = vecs.shape[1] if len(vecs) else self.dim
         return vecs
 
     def _pick_embedding_model(self, base: str) -> str:
