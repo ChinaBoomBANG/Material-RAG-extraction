@@ -332,13 +332,22 @@ class Extractor:
                                 else parsed.get("raw"),
                                 unit=unit, evidence=ev, parsed=parsed)
 
-                # ---- 物理合理性校验（只打警告，绝不改值）----
+                # ---- 物理合理性校验 ----
                 # 证据校验只能证明引文来自原文，证明不了它说的是这个字段。
                 # 铝合金成分表普遍不列 Al（余量），模型却会抓个数字填上，
                 # 引文校验照样通过——这层常识校验专门抓这种情况。
                 sv = parsed.get("value") if parsed["kind"] == "single" else parsed.get("raw")
                 issue = sanity_issue(key, sv, unit)
                 if issue:
+                    # 明显不符合常理的值不可能是真实数据，几乎都是"表不对题"的错位抽取。
+                    # 实测：文献 Table 2 是 ΔGseg（晶界偏聚自由能，kJ/mol，含 −9.127），
+                    # 列名带 of Mg / of Si / of Cu，模型就把它塞进成分字段，引文还能逐字命中。
+                    # 质量分数不可能为负、也不可能超过 100 —— 这类值直接跳过，不生成字段。
+                    if (canonical_unit(unit) == "wt.%" and parsed["kind"] == "single"
+                            and isinstance(sv, (int, float)) and (sv < 0 or sv > 100)):
+                        rec.warnings.append(
+                            f"常识校验：{issue}（已跳过该字段，未写入记录）")
+                        continue
                     rec.warnings.append(f"常识校验：{issue}")
 
                 target = self._bucket(rec, key)

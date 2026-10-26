@@ -47,10 +47,14 @@ sh.Run "http://127.0.0.1:8848/", 1, False
 
 Function ServerReady()
     ' Returns True when the local server responds; never uses a proxy.
+    ' Timeouts are set explicitly: WinHTTP defaults can wait far longer than
+    ' intended on a not-yet-listening port, which shows up as "double-click
+    ' does nothing for a while".
     On Error Resume Next
     Dim w
     Set w = CreateObject("WinHttp.WinHttpRequest.5.1")
     w.SetAutoLogProxy 0
+    w.SetTimeouts 500, 500, 1000, 1000
     w.Open "GET", "http://127.0.0.1:8848/api/status", False
     w.Send
     ServerReady = (Err.Number = 0)

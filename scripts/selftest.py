@@ -239,6 +239,38 @@ def t_extract_verify():
               "elongation 的引文不在原文中")
         check("记录带出警信息", len(rec.warnings) >= 1, f"{rec.warnings}")
 
+    # 负值成分：实测踩过——模型把热力学表（ΔGseg，kJ/mol，含负值）的数值
+    # 塞进成分字段，引文逐字命中、证据校验通过。这类值必须整字段跳过，
+    # 且不能影响同一行里其他正常字段。
+    tbl = Chunk.make("doc1", "test_paper.pdf", 8, "table",
+                     "[表格] Table 2 The ΔGseg\n| | ΔGseg Gb of Mg | Si |\n|---|---|---|\n"
+                     "| AC-AlMgSi | −9.127 | 1.2 |")
+
+    class NegLLM:
+        def chat_json(self, user, system="", retry_hint="", response_format=None):
+            return {"records": [{
+                "row_label": "AC-AlMgSi",
+                "alloy": {"raw": "AC-AlMgSi", "quote": "AC-AlMgSi"},
+                "fields": {
+                    "composition.Mg": {"raw": "-9.127", "quote": "−9.127 | 1.2"},
+                    "composition.Si": {"raw": "1.2", "quote": "−9.127 | 1.2"},
+                },
+                "note": ""}]}
+
+    specs_neg = build_schema_from_headers(["合金牌号", "Mg", "Si"])["specs"]
+    recs_neg = Extractor(NegLLM(), cfg.load()).extract([tbl], specs_neg)
+    check("含不合理字段的记录仍被保留", len(recs_neg) == 1, f"实得 {len(recs_neg)} 条")
+    if recs_neg:
+        rec_neg = recs_neg[0]
+        check("负值成分被跳过（不生成该字段）",
+              "Mg" not in rec_neg.composition, f"实得字段 {list(rec_neg.composition)}")
+        check("同一条记录里的正常字段不受影响",
+              rec_neg.composition.get("Si") is not None,
+              f"实得字段 {list(rec_neg.composition)}")
+        check("跳过不合理值时留下警告说明",
+              any("已跳过" in w and "超出 0~100" in w for w in rec_neg.warnings),
+              f"{rec_neg.warnings}")
+
 
 def t_merge_records():
     print("\n[6b] 跨块记录合并（成分表 + 性能表应拼齐，不同条件不能误并）")
