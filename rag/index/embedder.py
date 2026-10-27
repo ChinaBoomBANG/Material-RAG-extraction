@@ -18,6 +18,7 @@ import urllib.request
 import numpy as np
 
 from .. import config as cfg
+from ..llm.client import opener_for
 
 
 class Embedder:
@@ -121,7 +122,6 @@ class Embedder:
         parts: list[np.ndarray] = []
         total = len(texts)
         # 本地地址必须绕过系统代理，否则模型服务未启动时请求会在代理里干等到超时。
-        from ..llm.client import opener_for
         url = f"{base}/embeddings"
         opener = opener_for(url)
         for i in range(0, total, bs):
@@ -154,7 +154,6 @@ class Embedder:
         return vecs
 
     def _pick_embedding_model(self, base: str) -> str:
-        from ..llm.client import opener_for
         url = f"{base}/models"
         with opener_for(url).open(url, timeout=15) as r:
             data = json.load(r)

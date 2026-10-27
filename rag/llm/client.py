@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import re
+import socket
 import time
 import urllib.error
 import urllib.parse
@@ -46,8 +47,6 @@ def _probe_port(url: str, timeout: float = 0.35) -> str | None:
 
     用途：避免为"服务根本没起来"这种情况付出 HTTP 层的整套超时代价。
     """
-    import socket
-
     u = urllib.parse.urlparse(url)
     host = (u.hostname or "127.0.0.1").lower()
     port = u.port or (443 if u.scheme == "https" else 80)
@@ -72,6 +71,9 @@ class LLMClient:
 
     # ---------------------------------------------------------- 基础
 
+    def _url(self, path: str) -> str:
+        return f"{self.base_url}{path}"
+
     def _headers(self) -> dict[str, str]:
         h = {"Content-Type": "application/json"}
         if self.api_key:
@@ -79,7 +81,7 @@ class LLMClient:
         return h
 
     def _post(self, path: str, payload: dict, timeout: int | None = None) -> dict:
-        url = f"{self.base_url}{path}"
+        url = self._url(path)
         data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         t = timeout or int(self.gen.get("timeout_s", 600))
         opener = opener_for(url)
@@ -110,7 +112,7 @@ class LLMClient:
     # ---------------------------------------------------------- 模型发现
 
     def list_models(self) -> list[str]:
-        url = f"{self.base_url}/models"
+        url = self._url("/models")
         req = urllib.request.Request(url, headers=self._headers())
         with opener_for(url).open(req, timeout=15) as r:
             data = json.load(r)
@@ -180,7 +182,7 @@ class LLMClient:
         except (KeyError, IndexError) as e:
             # 带上实际请求地址：最常见的坑是 base_url 少了 /v1，
             # 服务端会回 "Unexpected endpoint or method"，光看响应体根本看不出原因。
-            url = f"{self.base_url}/chat/completions"
+            url = self._url("/chat/completions")
             hint = ""
             if not url.rstrip("/").endswith("/v1") and "/v1/" not in url:
                 hint = (f"（提示：base_url={self.base_url!r} 似乎缺少 /v1，"

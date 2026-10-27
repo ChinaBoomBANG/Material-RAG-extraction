@@ -112,7 +112,7 @@ class ExtractReq(BaseModel):
     excel_path: str | None = None      # 不填 = 只抽取并显示，不涉及任何表格
     mode: str = "auto"
     max_chunks: int = 0
-    skip: int = 0                      # 继续抽取：跳过排序后前 N 块（上次已完成）
+    skip_ids: list[str] = []           # 继续抽取：已抽过的块 id（与块列表顺序无关）
     headers: list[str] | None = None
     schema_name: str | None = None     # 模板名或路径；留空 = 内置模板
     schema_text: str | None = None     # 界面上直接传 YAML/JSON 文本
@@ -201,7 +201,8 @@ def extract(req: ExtractReq):
         p.ensure_models()
         schema_arg = req.schema_text or req.schema_name or None
         res = p.extract(excel_path=req.excel_path, mode=req.mode,
-                        max_chunks=req.max_chunks, skip=req.skip,
+                        max_chunks=req.max_chunks,
+                        exclude_ids=req.skip_ids,
                         headers=req.headers,
                         schema=schema_arg, workers=req.workers)
         return _extract_payload(res, req.excel_path)
@@ -225,8 +226,8 @@ def extract_start(req: StartReq):
     q: queue.Queue = queue.Queue()
     _JOBS[jid] = {"q": q, "done": False, "result": None, "error": None,
                   "started_at": time.time(), "last": {},
-                  # 参数快照：刷新接管时要知道这批从哪块开始抽（skip），才能续对位置
-                  "req": {"skip": req.skip, "max_chunks": req.max_chunks,
+                  # 参数快照：刷新接管时用它还原"已抽过哪些块"，才能接着往下抽
+                  "req": {"skip_ids": req.skip_ids, "max_chunks": req.max_chunks,
                           "mode": req.mode, "doc_ids": req.doc_ids or []}}
 
     def work() -> None:
@@ -242,7 +243,8 @@ def extract_start(req: StartReq):
                 q.put({"type": "progress", **ev})
 
             res = p.extract(excel_path=req.excel_path, doc_ids=req.doc_ids,
-                            mode=req.mode, max_chunks=req.max_chunks, skip=req.skip,
+                            mode=req.mode, max_chunks=req.max_chunks,
+                            exclude_ids=req.skip_ids,
                             headers=req.headers, schema=schema_arg,
                             workers=req.workers or 2, on_event=on_ev,
                             should_stop=lambda: bool(_JOBS[jid].get("cancel")))

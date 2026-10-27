@@ -108,6 +108,7 @@ def cmd_fill(args) -> int:
     p = RagPipeline(lazy=False)
     res = p.extract(excel_path=args.excel, doc_ids=args.doc,
                     mode=args.mode, max_chunks=args.max_chunks,
+                    exclude_ids=args.skip_ids,
                     schema=args.schema, workers=(args.workers or None))
     recs = res["records"]
     dropped = res.get("dropped") or []
@@ -287,6 +288,8 @@ def build_parser() -> argparse.ArgumentParser:
     p3.add_argument("--max-chunks", type=int, default=0,
                     help="最多处理多少块（0=不限）。先试 3 块看质量再放开")
     p3.add_argument("--doc", nargs="*", default=None, help="限定文献 ID（文件名去扩展名）")
+    p3.add_argument("--skip-ids", nargs="*", default=None,
+                    help="续抽：已抽过的块 id 列表（界面会自动带上；命令行一般不必手动填）")
     p3.add_argument("--schema", default=None,
                     help="抽取模板：模板名（如 material_default）/ YAML 文件路径。"
                          "指定了 --excel 时以表头为准，此参数被覆盖")

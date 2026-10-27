@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { api, streamProgress } from './api'
 import SchemaPanel from './components/SchemaPanel.vue'
 import RunPanel from './components/RunPanel.vue'
@@ -72,13 +72,12 @@ const elapsedSec = computed(() => {
   return Math.round(progress.value?.elapsed || 0)
 })
 
-// 继续抽取：记录上一批实际抽到的块数（skip = 已完成的块数）
-const doneChunks = ref(0)
-// 改了抽取范围（文献 / 模式）后，「已抽 N 块」的位置就失去意义了：
-// 块列表本身变了，原来的 skip 会跳到错误的位置，所以必须归零重新计数。
-// 注意：只监听 selected / mode —— 「最大抽块数」只决定本次抽多少，
-// 不改变块列表顺序，skip 语义仍然成立，重置它会让"继续抽取"白白消失。
-watch([selected, mode], () => { doneChunks.value = 0 })
+// 继续抽取：记录「已经抽过哪些块」（按 chunk_id）。
+// 早期用的是"已抽块数 + skip"，但那个方案依赖块列表顺序不变：一旦切换抽取范围
+// （文献 / 表格↔自动↔全部），列表就变了，skip 会指到错误位置，所以只能把进度清零——
+// 用户体验就是"换个范围，继续抽取就没了"。按 id 排除与顺序无关，切换范围后依然准确。
+const doneIds = ref(new Set())
+const doneChunks = computed(() => doneIds.value.size)
 
 const statLine = computed(() => {
   const s = status.value?.index
@@ -153,7 +152,14 @@ async function saveTemplate(name) {
 }
 
 function onProgress(ev) {
-  if (ev.type === 'progress') progress.value = ev
+  if (ev.type === 'progress') {
+    progress.value = ev
+    // 服务端每完成一批就上报该批的 chunk_id，累积成"已抽集合"
+    if (Array.isArray(ev.chunk_ids)) {
+      for (const id of ev.chunk_ids) doneIds.value.add(id)
+      doneIds.value = new Set(doneIds.value)      // 触发 Vue 响应式更新
+    }
+  }
 }
 
 // 继续抽取时把新一批结果接到已有结果后面。
@@ -192,10 +198,10 @@ async function start(continueRun = false) {
   stopping.value = false
   if (!continueRun) {
     result.value = null
-    doneChunks.value = 0          // 全新开始
+    doneIds.value = new Set()     // 全新开始：清空已抽集合
   }
   progress.value = null           // 进度是本批的，两种情况都归零
-  const skip = continueRun ? doneChunks.value : 0
+  const skipIds = continueRun ? [...doneIds.value] : []
   startClock()
   try {
     const { job_id } = await api.startExtract({
@@ -203,7 +209,7 @@ async function start(continueRun = false) {
       mode: mode.value,
       workers: workers.value,
       max_chunks: maxChunks.value,
-      skip,
+      skip_ids: skipIds,
       doc_ids: selected.value,
       excel_path: excelPath.value.trim() || null,
     })
@@ -215,8 +221,6 @@ async function start(continueRun = false) {
         if (ev.type === 'done') {
           // 继续抽取：新结果追加到已有结果后面，不能覆盖（否则上一批记录全没了）
           result.value = continueRun ? mergeResults(result.value, ev.result) : ev.result
-          // 累计已抽块数，供「继续抽取」定位
-          doneChunks.value = skip + (progress.value?.done || 0)
           running.value = false
           jobId.value = ''
           stopping.value = false
@@ -285,13 +289,13 @@ async function adoptRunningJob() {
   try {
     const r = await api.runningJob()
     if (!r?.running) return
-    const skip = r.req?.skip || 0
-    doneChunks.value = skip      // 先按起始位置对齐，进度事件会继续累加
+    // 从任务请求里恢复"已抽过哪些块"（服务端存了本批的 skip_ids）
+    const ids = r.req?.skip_ids
+    if (Array.isArray(ids)) doneIds.value = new Set(ids)
     if (r.done && r.result) {
       result.value = r.result    // 已跑完：直接把结果还回来，不白等
       progress.value = r.progress?.done
         ? { ...r.progress } : null
-      doneChunks.value = skip + (r.progress?.done || 0)
       return
     }
     // 还在跑：重连 SSE，并把计时接到任务真正的起点
@@ -305,7 +309,6 @@ async function adoptRunningJob() {
         onProgress(ev)
         if (ev.type === 'done') {
           result.value = ev.result
-          doneChunks.value = skip + (progress.value?.done || 0)
           running.value = false
           jobId.value = ''
           stopping.value = false

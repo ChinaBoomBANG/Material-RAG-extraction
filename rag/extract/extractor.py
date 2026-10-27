@@ -163,12 +163,13 @@ class Extractor:
         def run(b: list[Chunk]) -> list[MaterialRecord]:
             return self._extract_batch(b, specs, context_of=context_of)
 
-        def emit(done: int, got: int) -> None:
+        def emit(done: int, got: int, ids: list[str] | None = None) -> None:
             if not on_event:
                 return
             try:
                 on_event({"done": done, "total": total, "records": got,
-                          "elapsed": round(_time.time() - t0, 1)})
+                          "elapsed": round(_time.time() - t0, 1),
+                          "chunk_ids": list(ids or [])})
             except Exception:
                 pass          # 进度回调绝不能影响抽取本身
 
@@ -178,11 +179,13 @@ class Extractor:
         if workers > 1 and total > 1:
             from concurrent.futures import as_completed
             with ThreadPoolExecutor(max_workers=workers) as ex:
-                futs = [ex.submit(run, b) for b in batches]
+                fut2batch = {ex.submit(run, b): b for b in batches}
+                futs = list(fut2batch)
                 for fut in as_completed(futs):
                     records.extend(fut.result())
                     done += 1
-                    emit(done, len(records))
+                    emit(done, len(records),
+                         [c.chunk_id for c in fut2batch[fut]])
                     if should_stop and should_stop():
                         stopped = True
                         for f in futs:      # 只取消还没开跑的，已在跑的让它收尾
@@ -195,7 +198,7 @@ class Extractor:
                     break
                 records.extend(run(b))
                 done = i
-                emit(i, len(records))
+                emit(i, len(records), [c.chunk_id for c in b])
 
         if stopped:
             emit(done, len(records))

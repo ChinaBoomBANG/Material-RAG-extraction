@@ -756,6 +756,18 @@ def t_chunk_plan(tmp: str):
     check("三模式计数与 plan 接口一致",
           counts == {"table": 3, "auto": 4, "all": 5}, str(counts))
 
+    # 按块 id 续抽：切换抽取范围后，块列表会变，靠"跳过前 N 块"会指错位置。
+    # 改成排除已抽 id 后，换模式续抽也不该抽到重复块。
+    _b1 = p.pick_chunks(mode="table", max_chunks=3)
+    _ids1 = [c.chunk_id for c in _b1]
+    _b2 = p.pick_chunks(mode="all", max_chunks=3, exclude_ids=_ids1)
+    _ids2 = [c.chunk_id for c in _b2]
+    check("切换范围后按 id 续抽不重复",
+          not (set(_ids1) & set(_ids2)), f"重叠 {len(set(_ids1) & set(_ids2))} 个")
+    check("排除已抽块后取到的是剩余块",
+          len(_ids2) == counts["all"] - len(_ids1),
+          f"实得 {len(_ids2)}，预期 {counts['all'] - len(_ids1)}")
+
     # 服务生命周期配置必须由接口下发（界面文案不许写死秒数——
     # 曾把 "8 秒" 硬编码在模板里，配置改成 15 秒后界面仍在骗人）
     _st = p.status().get("web") or {}

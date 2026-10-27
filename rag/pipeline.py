@@ -182,12 +182,16 @@ class RagPipeline:
     # ---------------------------------------------------------- 抽取
 
     def pick_chunks(self, mode: str = "auto", doc_ids: list[str] | None = None,
-                    max_chunks: int = 0, skip: int = 0) -> list[Chunk]:
+                    max_chunks: int = 0, skip: int = 0,
+                    exclude_ids: list[str] | None = None) -> list[Chunk]:
         """挑选送抽取的块。
 
         mode: table = 只要表格；auto = 表格 + 出现「数值+单位」的段落；all = 全部段落
         max_chunks: >0 时只取前 N 块（表格优先、按页码顺序），0 = 不限
-        skip: >0 时先跳过排序后的前 N 块——「继续抽取」从上次完成的位置接着抽
+        exclude_ids: 已抽过的块 id 列表。界面与 CLI 的「继续抽取」都走这条路：
+                     它与块列表顺序无关，切换文献范围或抽取模式后仍然准确。
+        skip: >0 时先跳过排序后的前 N 块。**仅适用于块列表不变**的场景
+              （脚本 / 自测里按数量取样），界面续抽不再使用它。
         """
         chunks = self.store.chunks
         if doc_ids:
@@ -201,6 +205,9 @@ class RagPipeline:
                       if c.kind == "table" or DATA_VALUE.search(c.text)]
         # 表格优先，其次按页码顺序
         picked.sort(key=lambda c: (0 if c.kind == "table" else 1, c.doc_id, c.page))
+        if exclude_ids:
+            done = set(exclude_ids)
+            picked = [c for c in picked if c.chunk_id not in done]
         if skip > 0:
             picked = picked[skip:]
         if max_chunks > 0:
@@ -211,7 +218,7 @@ class RagPipeline:
                 doc_ids: list[str] | None = None,
                 mode: str = "auto",
                 max_chunks: int = 0,
-                skip: int = 0,
+                exclude_ids: list[str] | None = None,
                 headers: list[str] | None = None,
                 schema=None,
                 workers: int | None = None,
@@ -249,8 +256,8 @@ class RagPipeline:
                             "schema": schema_def.to_dict(),
                             "note": "未指定 Schema，使用内置模板"}
 
-        chunks = self.pick_chunks(mode=mode, doc_ids=doc_ids, max_chunks=max_chunks,
-                                  skip=skip)
+        chunks = self.pick_chunks(mode=mode, doc_ids=doc_ids,
+                                  max_chunks=max_chunks, exclude_ids=exclude_ids)
         if not chunks:
             return {"records": [], "specs": specs, "schema": matched_info,
                     "schema_def": schema_def, "picked_chunks": 0,
