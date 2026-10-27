@@ -1,11 +1,12 @@
 ' MaterialRAG silent launcher (double-click to run)
 ' Starts the local server in the background with pythonw (no console window),
-' then opens the browser once the server actually answers. Log: data\output\web.log
+' then opens the browser once the server writes its readiness marker.
+' Logs: data\output\web.log (server) + data\output\launch.log (this script).
 ' Stop: just close the browser page (idle -> exits after web.shutdown_grace_s,
 '       15s by default; it will NOT stop while an extraction is running).
 Option Explicit
 
-Dim fso, sh, root, py, logDir, logFile, q, cmd
+Dim fso, sh, root, py, logDir, logFile, readyFile, launchLog, q, cmd, t0, waited
 
 Set fso = CreateObject("Scripting.FileSystemObject")
 Set sh = CreateObject("WScript.Shell")
@@ -26,38 +27,47 @@ End If
 logDir = root & "\data\output"
 If Not fso.FolderExists(logDir) Then fso.CreateFolder(logDir)
 logFile = logDir & "\web.log"
+readyFile = logDir & "\web.ready"
+launchLog = logDir & "\launch.log"
 
-' pythonw.exe has no console window; the app writes its own log file
+t0 = Timer()
+
+' 已有服务在跑（上次没关干净 / 页面还开着）：标记文件还在，直接开浏览器。
+If fso.FileExists(readyFile) Then
+    WriteLog "检测到就绪标记，认为服务已在运行，直接打开浏览器"
+    sh.Run "http://127.0.0.1:8848/", 1, False
+    WScript.Quit 0
+End If
+
+WriteLog "开始启动服务"
 cmd = q & py & q & " -m rag.cli serve --port 8848 --no-browser --log-file " & q & logFile & q
 sh.Run cmd, 0, False
 
-' Poll /api/status until the server answers (max 30s), then open the browser.
-' A fixed 2.5s sleep used to fire too early: the index takes a few seconds to
-' load, so the browser hit "127.0.0.1 refused to connect" and only worked after
-' a manual refresh. Proxy lookups are disabled explicitly, because a system-wide
-' proxy would otherwise intercept even 127.0.0.1 and report a false negative.
-Dim waited
+' 轮询服务写下的就绪标记文件（最多 60 秒）。
+' 早先的做法是轮询 /api/status：VBS 里 WinHttp 的代理与超时行为不可控，
+' 一旦某次探测失败/卡住，就只能耗到上限才开浏览器（用户侧就是"双击后很久没反应"）。
+' 文件判定是纯本地操作，不存在网络语义，可靠且是毫秒级。
 waited = 0
-Do While waited < 30000
-    If ServerReady() Then Exit Do
-    WScript.Sleep 120
-    waited = waited + 120
+Do While waited < 60000
+    If fso.FileExists(readyFile) Then Exit Do
+    WScript.Sleep 100
+    waited = waited + 100
 Loop
-sh.Run "http://127.0.0.1:8848/", 1, False
 
-Function ServerReady()
-    ' Returns True when the local server responds; never uses a proxy.
-    ' Timeouts are set explicitly: WinHTTP defaults can wait far longer than
-    ' intended on a not-yet-listening port, which shows up as "double-click
-    ' does nothing for a while".
+If fso.FileExists(readyFile) Then
+    WriteLog "服务就绪，等待 " & FormatNumber(Timer() - t0, 2) & " 秒"
+Else
+    WriteLog "等待 " & FormatNumber(Timer() - t0, 2) & " 秒仍未就绪，仍尝试打开浏览器（服务可能启动失败，请看 web.log）"
+End If
+
+sh.Run "http://127.0.0.1:8848/", 1, False
+WriteLog "已打开浏览器，脚本总耗时 " & FormatNumber(Timer() - t0, 2) & " 秒"
+
+Sub WriteLog(msg)
     On Error Resume Next
-    Dim w
-    Set w = CreateObject("WinHttp.WinHttpRequest.5.1")
-    w.SetAutoLogProxy 0
-    w.SetTimeouts 500, 500, 2000, 4000
-    w.Open "GET", "http://127.0.0.1:8848/api/status", False
-    w.Send
-    ServerReady = (Err.Number = 0)
-    Err.Clear
+    Dim f
+    Set f = fso.OpenTextFile(launchLog, 8, True)
+    f.WriteLine Now & "  " & msg
+    f.Close
     On Error GoTo 0
-End Function
+End Sub

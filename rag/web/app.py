@@ -67,6 +67,32 @@ def _err(e: Exception) -> JSONResponse:
 
 # ---------------------------------------------------------------- 状态
 
+@app.on_event("startup")
+def _write_ready_marker() -> None:
+    """服务真正就绪后写标记文件。
+
+    启动脚本（start_web.vbs）改为轮询这个文件，而不是发 HTTP 请求：
+    VBS 里 WinHttp 的代理/超时行为不可控，检测一旦失效就会空等到超时上限
+    （用户侧表现为"双击后两三秒到几十秒才出页面"）。文件判定是纯本地操作，
+    毫秒级且没有网络语义可出错。
+    """
+    try:
+        d = cfg.path("project.output_dir")
+        cfg.ensure_dir(d)
+        with open(os.path.join(d, "web.ready"), "w", encoding="utf-8") as f:
+            f.write(str(os.getpid()))
+    except Exception:
+        pass
+
+
+@app.on_event("shutdown")
+def _clear_ready_marker() -> None:
+    try:
+        os.remove(os.path.join(cfg.path("project.output_dir"), "web.ready"))
+    except Exception:
+        pass
+
+
 @app.get("/api/status")
 def status():
     try:
@@ -238,8 +264,8 @@ def extract_start(req: StartReq):
     jid = uuid.uuid4().hex[:12]
     q: queue.Queue = queue.Queue()
     _JOBS[jid] = {"q": q, "done": False, "result": None, "error": None,
-                  "started_at": time.time(), "last": {},
-                  # 参数快照：刷新接管时用它还原"已抽过哪些块"，才能接着往下抽
+                  "started_at": time.time(), "last": {}, "done_ids": [],
+                  # 参数快照：记录本批是怎么发起的
                   "req": {"skip_ids": req.skip_ids, "max_chunks": req.max_chunks,
                           "mode": req.mode, "doc_ids": req.doc_ids or []}}
 
@@ -253,6 +279,11 @@ def extract_start(req: StartReq):
             def on_ev(ev: dict) -> None:
                 last.update(ev)
                 _JOBS[jid]["last"] = dict(ev)
+                # 累积本批已完成的块 id：刷新后靠它精确还原"抽到哪了"。
+                # 不能用 req.skip_ids 代替——那是本批启动时的起点，不含本批新抽的块。
+                ids = ev.get("chunk_ids")
+                if ids:
+                    _JOBS[jid]["done_ids"].extend(ids)
                 q.put({"type": "progress", **ev})
 
             res = p.extract(excel_path=req.excel_path, doc_ids=req.doc_ids,
@@ -293,12 +324,14 @@ def _running_job() -> dict:
             return {"job_id": jid, "done": False,
                     "started_at": j.get("started_at", 0.0),
                     "progress": dict(j.get("last") or {}),
+                    "done_ids": list(j.get("done_ids") or []),
                     "result": None, "req": dict(j.get("req") or {})}
     for jid, j in list(_JOBS.items()):
         if j.get("done") and j.get("result"):
             return {"job_id": jid, "done": True,
                     "started_at": j.get("started_at", 0.0),
                     "progress": dict(j.get("last") or {}),
+                    "done_ids": list(j.get("done_ids") or []),
                     "result": j.get("result"), "req": dict(j.get("req") or {})}
     return {}
 

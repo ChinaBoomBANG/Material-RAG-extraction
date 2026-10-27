@@ -76,7 +76,19 @@ const elapsedSec = computed(() => {
 // 早期用的是"已抽块数 + skip"，但那个方案依赖块列表顺序不变：一旦切换抽取范围
 // （文献 / 表格↔自动↔全部），列表就变了，skip 会指到错误位置，所以只能把进度清零——
 // 用户体验就是"换个范围，继续抽取就没了"。按 id 排除与顺序无关，切换范围后依然准确。
-const doneIds = ref(new Set())
+// 已抽块 id 持久化到 localStorage：否则刷新页面（或关掉重开）进度就归零，
+// 「继续抽取」按钮随之消失——这正是"换个参数就得从头抽"的根源。
+const STORAGE_KEY = 'rag.doneChunkIds'
+function loadDoneIds() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY)
+    return new Set(raw ? JSON.parse(raw) : [])
+  } catch (e) { return new Set() }
+}
+function saveDoneIds() {
+  try { localStorage.setItem(STORAGE_KEY, JSON.stringify([...doneIds.value])) } catch (e) {}
+}
+const doneIds = ref(loadDoneIds())
 const doneChunks = computed(() => doneIds.value.size)
 
 const statLine = computed(() => {
@@ -158,6 +170,7 @@ function onProgress(ev) {
     if (Array.isArray(ev.chunk_ids)) {
       for (const id of ev.chunk_ids) doneIds.value.add(id)
       doneIds.value = new Set(doneIds.value)      // 触发 Vue 响应式更新
+      saveDoneIds()
     }
   }
 }
@@ -199,6 +212,7 @@ async function start(continueRun = false) {
   if (!continueRun) {
     result.value = null
     doneIds.value = new Set()     // 全新开始：清空已抽集合
+    try { localStorage.removeItem(STORAGE_KEY) } catch (e) {}
   }
   progress.value = null           // 进度是本批的，两种情况都归零
   const skipIds = continueRun ? [...doneIds.value] : []
@@ -289,9 +303,15 @@ async function adoptRunningJob() {
   try {
     const r = await api.runningJob()
     if (!r?.running) return
-    // 从任务请求里恢复"已抽过哪些块"（服务端存了本批的 skip_ids）
-    const ids = r.req?.skip_ids
-    if (Array.isArray(ids)) doneIds.value = new Set(ids)
+    // 恢复"已抽过哪些块"：用服务端累积的 done_ids（本批真正完成的块）。
+    // 注意不能用 req.skip_ids —— 那只是本批启动时的起点，不含本批新抽的块，
+    // 用它覆盖会把进度清空，正是按钮消失的元凶。
+    const ids = r.done_ids
+    if (Array.isArray(ids) && ids.length) {
+      const merged = new Set([...doneIds.value, ...ids])
+      doneIds.value = merged
+      saveDoneIds()
+    }
     if (r.done && r.result) {
       result.value = r.result    // 已跑完：直接把结果还回来，不白等
       progress.value = r.progress?.done
