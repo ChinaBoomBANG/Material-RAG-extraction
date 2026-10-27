@@ -17,11 +17,15 @@ from .extract.schema import FIELD_DICT, FieldSpec, build_schema_from_headers
 from .index.embedder import Embedder
 from .index.retriever import Retriever, format_context
 from .index.store import Store
-from .ingest import parse_pdf
 from .llm.client import LLMClient
 from .models import Answer, Chunk, MaterialRecord
 from .schemas import builtin_schema, load_any
-from .writeback.excel import ExcelTarget, save_report
+
+# 注意：以下两个模块**故意不在顶层导入**
+#   .ingest        -> 拉起 pymupdf（约 63 ms）
+#   .writeback.excel -> 拉起 pandas + openpyxl（约 485 ms）
+# 它们只在"解析 PDF"和"写 Excel"时才用得上，顶层导入会让每次启动白付这 0.5 秒。
+# 见 ingest() / extract() / writeback() 内的局部导入。
 
 # 关键词表（保留给其它用途参考；auto 模式不再单独依赖它）
 DATA_HINT = re.compile(
@@ -89,6 +93,7 @@ class RagPipeline:
     # ---------------------------------------------------------- 索引
 
     def ingest(self, pdf_glob: str | None = None, force: bool = False) -> dict:
+        from .ingest import parse_pdf      # 延迟导入：拉起 pymupdf
         self.ensure_models()
         pattern = pdf_glob or os.path.join(self.raw_dir, "*.pdf")
         files = sorted(glob.glob(pattern))
@@ -233,7 +238,8 @@ class RagPipeline:
         """
         self.ensure_models()
         if headers is None and excel_path:
-            headers = ExcelTarget(excel_path, self.conf).headers()
+            from .writeback.excel import ExcelTarget as _X       # 延迟导入：拉起 pandas
+            headers = _X(excel_path, self.conf).headers()
 
         schema_def = None
         if headers:
@@ -299,6 +305,7 @@ class RagPipeline:
     def writeback(self, records: list[MaterialRecord], specs: dict[str, FieldSpec],
                   excel_path: str, dry_run: bool | None = None,
                   trusted_only: bool = True) -> dict:
+        from .writeback.excel import ExcelTarget, save_report   # 延迟导入：拉起 pandas
         target = ExcelTarget(excel_path, self.conf)
         rows, evidence = ExcelTarget.to_rows(records, specs, trusted_only=trusted_only)
         preview = target.write_preview(rows, evidence)

@@ -40,8 +40,8 @@ Dim waited
 waited = 0
 Do While waited < 30000
     If ServerReady() Then Exit Do
-    WScript.Sleep 300
-    waited = waited + 300
+    WScript.Sleep 120
+    waited = waited + 120
 Loop
 sh.Run "http://127.0.0.1:8848/", 1, False
 

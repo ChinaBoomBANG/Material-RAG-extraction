@@ -21,11 +21,24 @@ from pydantic import BaseModel
 
 from .. import config as cfg
 from ..pipeline import RagPipeline
+_EXCEL_TARGET = None
+
+
+def excel_target():
+    """返回 ExcelTarget 类；首次调用时才导入 pandas / openpyxl。"""
+    global _EXCEL_TARGET
+    if _EXCEL_TARGET is None:
+        from ..writeback.excel import ExcelTarget
+        _EXCEL_TARGET = ExcelTarget
+    return _EXCEL_TARGET
+
+
 from ..schemas import (apply_field_edit, builtin_schema, from_text, list_schemas,
                        parse_field_spec, resolve, save, schemas_dir)
-from ..writeback import diff as diffmod
 from ..writeback.clean import clean_rows, dedupe_rows
-from ..writeback.excel import ExcelTarget
+
+# pandas + openpyxl 只在"导出 / 写回 Excel"时才需要，顶层导入会让每次启动
+# 多付约 485 ms（pandas 304 + openpyxl 181）。这里改成首次使用时再加载。
 
 app = FastAPI(title="MaterialRAG", version="0.2.0")
 _WEB = os.path.dirname(os.path.abspath(__file__))
@@ -122,11 +135,11 @@ class ExtractReq(BaseModel):
 def _extract_payload(res: dict, excel_path: str | None) -> dict:
     """把管线结果整理成前端要的形状（同步接口与 SSE 任务共用）。"""
     recs = res["records"]
-    rows, evidence = ExcelTarget.to_rows(recs, res["specs"], trusted_only=True)
+    rows, evidence = excel_target().to_rows(recs, res["specs"], trusted_only=True)
     specs = res["specs"]
     ordered = [s.column for s in specs.values() if any(s.column in r for r in rows)]
     if excel_path:
-        headers = ExcelTarget(excel_path, cfg.load()).headers()
+        headers = excel_target()(excel_path, cfg.load()).headers()
     else:
         headers = ordered
     sdef = res.get("schema_def")
@@ -351,13 +364,14 @@ def fill(req: FillReq):
     """
     try:
         from ..models import MaterialRecord
-        target = ExcelTarget(req.excel_path, cfg.load())
+        target = excel_target()(req.excel_path, cfg.load())
         specs = target.schema()["specs"]
         records = [MaterialRecord.record_from_dict(r) for r in req.records]
-        rows, _ev = ExcelTarget.to_rows(records, specs, trusted_only=True)
+        rows, _ev = excel_target().to_rows(records, specs, trusted_only=True)
         w = target.write(rows, dry_run=not req.confirm)
         if not w.get("dry_run"):
-            w["report_text"] = diffmod.format_report(w)
+            from ..writeback import diff as _diffmod     # 延迟导入：拉起 openpyxl
+            w["report_text"] = _diffmod.format_report(w)
         return {"ok": True, **w}
     except Exception as e:
         return _err(e)
@@ -592,7 +606,7 @@ def export_data(req: ExportReq):
         opts = _clean_opts(req.clean)
 
         recs = [MaterialRecord.record_from_dict(r) for r in req.records]
-        rows, _ev = ExcelTarget.to_rows(recs, specs,
+        rows, _ev = excel_target().to_rows(recs, specs,
                                         trusted_only=opts["drop_unverified"])
         deduped = 0
         if opts["dedupe"]:
@@ -660,7 +674,7 @@ def export_data(req: ExportReq):
                                          "error": "导出 Excel 需要先填目标路径"})
         target = os.path.abspath(req.excel_path)
         if os.path.exists(target):
-            wres = ExcelTarget(target, cfg.load()).write(rows, dry_run=False)
+            wres = excel_target()(target, cfg.load()).write(rows, dry_run=False)
         else:
             wres = _write_new_xlsx(target, headers, rows)
         return {"ok": True, "format": "xlsx", "write": wres,

@@ -28,6 +28,11 @@ class LLMError(RuntimeError):
 
 _LOCAL_HOSTS = {"127.0.0.1", "localhost", "::1", "0.0.0.0"}
 
+# 健康检查短缓存：前端会周期性拉 /api/status，每次都探测端口 + 请求 /models
+# 属于重复劳动（模型是否在线不可能毫秒级反复变化）。缓存几秒即可。
+_HEALTH_CACHE: dict = {"key": None, "ts": 0.0, "val": None}
+_HEALTH_TTL = 3.0
+
 
 def opener_for(url: str):
     """按目标地址选择 opener：本地地址**不走代理**。
@@ -42,14 +47,20 @@ def opener_for(url: str):
     return urllib.request.build_opener()
 
 
-def _probe_port(url: str, timeout: float = 0.35) -> str | None:
+def _probe_port(url: str, timeout: float | None = None) -> str | None:
     """快速探测 TCP 端口是否可连。可连返回 None，不可连通返回原因字符串。
 
     用途：避免为"服务根本没起来"这种情况付出 HTTP 层的整套超时代价。
+
+    超时按目标区分：本机回环要么立刻连上、要么立刻被拒（毫秒级），
+    给 0.1s 足够；若统一用 0.35s，模型没启动时每次状态查询都要白等 0.35 秒
+    （实测 /api/status 每次都慢到 0.36s 就是这里）。远端网络可能真有延迟，给 1.5s。
     """
     u = urllib.parse.urlparse(url)
     host = (u.hostname or "127.0.0.1").lower()
     port = u.port or (443 if u.scheme == "https" else 80)
+    if timeout is None:
+        timeout = 0.1 if host in _LOCAL_HOSTS else 1.5
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             s.settimeout(timeout)
@@ -127,19 +138,27 @@ class LLMClient:
             self._resolved = True
         return self.model
 
-    def health(self) -> dict:
+    def health(self, ttl: float = _HEALTH_TTL) -> dict:
+        key = (self.base_url, self.model)
+        now = time.time()
+        if (_HEALTH_CACHE["val"] is not None and _HEALTH_CACHE["key"] == key
+                and now - _HEALTH_CACHE["ts"] < ttl):
+            return _HEALTH_CACHE["val"]
         # 先做毫秒级端口探测：服务没起来时，HTTP 层连接要等约 2 秒才报错
         # （实测未监听的本地端口连接耗时 2.0s）。界面状态接口会被这 2 秒拖住，
         # 启动脚本轮询跟着超时，表现就是"双击后长时间没反应"。
-        probe = _probe_port(self.base_url, timeout=0.35)
+        probe = _probe_port(self.base_url)
         if probe is not None:
-            return {"ok": False, "base_url": self.base_url, "error": probe}
-        try:
-            ids = self.list_models()
-            return {"ok": True, "base_url": self.base_url,
-                    "models": ids, "using": self.model or (ids[0] if ids else None)}
-        except Exception as e:
-            return {"ok": False, "base_url": self.base_url, "error": str(e)}
+            val = {"ok": False, "base_url": self.base_url, "error": probe}
+        else:
+            try:
+                ids = self.list_models()
+                val = {"ok": True, "base_url": self.base_url,
+                       "models": ids, "using": self.model or (ids[0] if ids else None)}
+            except Exception as e:
+                val = {"ok": False, "base_url": self.base_url, "error": str(e)}
+        _HEALTH_CACHE.update({"key": key, "ts": now, "val": val})
+        return val
 
     # ---------------------------------------------------------- 生成
 

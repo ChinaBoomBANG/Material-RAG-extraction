@@ -191,13 +191,16 @@ def t_pipeline(tmp: str):
               f"索引 dim={st['dim']} 模型 dim={emb.dim}")
     check("向量数量与块数一致", st["vectors"] == st["chunks"])
 
-    store2 = Store(idx_dir).load()
-    ret = Retriever(store2, emb, cfg.load())
-    hits = ret.search("6061 的时效温度和屈服强度", top_k=3)
-    check("检索返回结果", len(hits) > 0, f"{len(hits)} 条")
-    joined = " ".join(h["chunk"].text for h in hits)
-    check("命中关键信息（175 C / 276 MPa）", ("175" in joined) or ("276" in joined),
-          f"片段含 175={'175' in joined} 276={'276' in joined}")
+    if emb_live:
+        # 检索也要走编码器（encode_query），embedding 不可用时一并跳过，
+    # 否则离线环境下自测会在这里抛 ConnectionRefused
+        store2 = Store(idx_dir).load()
+        ret = Retriever(store2, emb, cfg.load())
+        hits = ret.search("6061 的时效温度和屈服强度", top_k=3)
+        check("检索返回结果", len(hits) > 0, f"{len(hits)} 条")
+        joined = " ".join(h["chunk"].text for h in hits)
+        check("命中关键信息（175 C / 276 MPa）", ("175" in joined) or ("276" in joined),
+              f"片段含 175={'175' in joined} 276={'276' in joined}")
 
 
 # ---------------------------------------------------------------- 6. 抽取校验（模拟模型输出）
@@ -718,7 +721,14 @@ def t_chunk_plan(tmp: str):
     ]
     emb = Embedder(cfg.load())
     emb.load()
-    store.add(cs, emb.encode_documents([c.text for c in cs]))
+    # 这里只是要建一个可用的 store 来测块筛选，向量内容无关紧要；
+    # embedding 服务不可用时用占位向量，保证自测能离线跑。
+    try:
+        _vecs = emb.encode_documents([c.text for c in cs])
+    except Exception:
+        import numpy as np
+        _vecs = np.zeros((len(cs), 8), dtype=np.float32)
+    store.add(cs, _vecs)
     store.save()
 
     p = RagPipeline()
