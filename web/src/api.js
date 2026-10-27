@@ -22,7 +22,6 @@ export const api = {
   status: () => json('/api/status'),
   config: () => json('/api/config'),
   llm: () => json('/api/llm'),
-  ui: () => json('/api/ui'),
   docs: () => json('/api/docs'),
   templates: () => json('/api/schema/templates'),
   schemaGet: (name) => json(`/api/schema/${encodeURIComponent(name)}`),
@@ -36,7 +35,6 @@ export const api = {
   ask: (question, top_k) => post('/api/ask', { question, top_k }),
   sessionHello: (id) => post('/api/session/hello', { id }),
   sessionPing: (id) => post('/api/session/ping', { id }),
-  sessionBye: (id) => post('/api/session/bye', { id }),
   stopServer: () => post('/api/session/shutdown', {}),
   exportXlsx: (payload) => post('/api/export', { ...payload, format: 'xlsx' }),
   // CSV 走 blob 下载，顺手把清洗报告从响应头里读出来

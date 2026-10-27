@@ -22,7 +22,7 @@ import openpyxl
 from rag import config as cfg
 from rag.extract.extractor import Extractor
 from rag.extract.normalize import canonical_unit, parse_value, verify_quote
-from rag.extract.schema import build_schema_from_headers, match_header
+from rag.extract.schema import build_schema_from_headers
 from rag.index import Embedder, Store
 from rag.index.retriever import Retriever
 from rag.ingest import parse_pdf

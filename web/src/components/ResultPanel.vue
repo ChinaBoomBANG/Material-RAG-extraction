@@ -7,8 +7,6 @@ const props = defineProps({
   running: { type: Boolean, default: false },
   schemaText: { type: String, default: '' },
 })
-const emit = defineEmits(['reset'])
-
 const view = ref('table')
 const openRec = ref('')
 const showDropped = ref(false)
@@ -23,7 +21,6 @@ const cleaner = ref({
   trim: true, unicode: true, space_in_number: true, strip_unit: false,
   balance_col: true,   // 补余量列：表里没有 Al 时补一列 Al=Bal.
 })
-const showUnverified = ref(true)
 
 watch(() => props.result, () => { openRec.value = '' })
 

@@ -14,7 +14,8 @@ import uuid
 
 import yaml
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse,
+                               StreamingResponse)
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -41,7 +42,6 @@ from ..writeback.clean import clean_rows, dedupe_rows
 
 app = FastAPI(title="MaterialRAG", version="0.2.0")
 _WEB = os.path.dirname(os.path.abspath(__file__))
-_STATIC = os.path.join(_WEB, "static")       # 旧版单页（dist 不存在时兜底）
 _DIST = os.path.join(_WEB, "dist")           # Vite 构建产物
 
 _pipe: RagPipeline | None = None
@@ -174,7 +174,7 @@ class ExtractReq(BaseModel):
 
 
 def _extract_payload(res: dict, excel_path: str | None) -> dict:
-    """把管线结果整理成前端要的形状（同步接口与 SSE 任务共用）。"""
+    """把管线结果整理成前端要的形状（供 SSE 任务与导出复用）。"""
     recs = res["records"]
     rows, evidence = excel_target().to_rows(recs, res["specs"], trusted_only=True)
     specs = res["specs"]
@@ -248,24 +248,7 @@ def extract_plan(req: PlanReq):
         return _err(e)
 
 
-@app.post("/api/extract")
-def extract(req: ExtractReq):
-    try:
-        p = pipe()
-        p.ensure_models()
-        schema_arg = req.schema_text or req.schema_name or None
-        res = p.extract(excel_path=req.excel_path, mode=req.mode,
-                        max_chunks=req.max_chunks,
-                        exclude_ids=req.skip_ids,
-                        headers=req.headers,
-                        schema=schema_arg, workers=req.workers)
-        return _extract_payload(res, req.excel_path)
-    except Exception as e:
-        return _err(e)
-
-
 # ---------------------------------------------------------------- 异步抽取 + 进度
-
 _JOBS: dict[str, dict] = {}
 
 
@@ -290,6 +273,7 @@ def extract_start(req: StartReq):
 
     def work() -> None:
         last: dict = {}
+        used_workers = int(req.workers or 2)
         try:
             p = pipe()
             p.ensure_models()
@@ -311,6 +295,8 @@ def extract_start(req: StartReq):
                             headers=req.headers, schema=schema_arg,
                             workers=req.workers or 2, on_event=on_ev,
                             should_stop=lambda: bool(_JOBS[jid].get("cancel")))
+            # 实测并发以管线为准（会被 extract.max_workers 夹住），记下来供预估换算
+            used_workers = int(res.get("workers") or used_workers)
             payload = _extract_payload(res, req.excel_path)
             _JOBS[jid]["result"] = payload
             _save_last_result(jid, _JOBS[jid], payload)
@@ -332,7 +318,7 @@ def extract_start(req: StartReq):
                     job["cv"].notify_all()
             # 用实测墙钟时间更新「每块耗时」经验值，供界面开跑前预估
             if last.get("done") and last.get("elapsed"):
-                _note_speed(last["elapsed"] / last["done"])
+                _note_speed(last["elapsed"] / last["done"], used_workers)
 
     threading.Thread(target=work, daemon=True).start()
     return {"ok": True, "job_id": jid}
@@ -585,35 +571,6 @@ def extract_stream(job_id: str):
     return StreamingResponse(gen(), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache",
                                       "X-Accel-Buffering": "no"})
-
-
-class FillReq(BaseModel):
-    excel_path: str
-    records: list[dict]          # MaterialRecord.to_dict() 的结果（含证据）
-    confirm: bool = False
-
-
-@app.post("/api/fill")
-def fill(req: FillReq):
-    """写入 Excel。
-
-    安全约束：本端点**不接受**平铺的行数据，只接受带证据的原始记录。
-    服务端会重新读取表头、重建记录、并强制 trusted_only=True ——
-    未通过原文核验的字段在这一步必然被过滤，前端无法绕过。
-    """
-    try:
-        from ..models import MaterialRecord
-        target = excel_target()(req.excel_path, cfg.load())
-        specs = target.schema()["specs"]
-        records = [MaterialRecord.record_from_dict(r) for r in req.records]
-        rows, _ev = excel_target().to_rows(records, specs, trusted_only=True)
-        w = target.write(rows, dry_run=not req.confirm)
-        if not w.get("dry_run"):
-            from ..writeback import diff as _diffmod     # 延迟导入：拉起 openpyxl
-            w["report_text"] = _diffmod.format_report(w)
-        return {"ok": True, **w}
-    except Exception as e:
-        return _err(e)
 
 
 # ---------------------------------------------------------------- 模型探测
@@ -1069,30 +1026,29 @@ def session_shutdown():
 # ---------------------------------------------------------------- 前端静态资源
 
 _NO_STORE = {"Cache-Control": "no-store, must-revalidate"}
+_NO_DIST_HTML = """<!doctype html><meta charset="utf-8">
+<meta name="color-scheme" content="only light">
+<title>前端未构建</title>
+<body style="font:15px/1.7 'Microsoft YaHei',sans-serif;padding:40px;color:#000">
+<h2>前端还没有构建</h2>
+<p><code>rag/web/dist/</code> 不存在或缺少 <code>index.html</code>。</p>
+<p>在项目根目录双击 <code>build_web.bat</code>（等价于
+<code>python scripts/build_web.py</code>）构建一次即可。</p>
+</body>"""
 
 
 @app.get("/")
-def index() -> FileResponse:
-    """优先返回 Vite 构建产物；没有构建过就退回旧版单页。
+def index():
+    """返回 Vite 构建产物。
 
     no-store：浏览器默认会对没有缓存头的 HTML 做"启发式缓存"，改过前端代码
     重新构建后，用户看到的还是旧页面（表现就是"修好了但界面没变"）。
     资产文件名带 hash，跟着 HTML 走即可，不需要额外处理。
     """
     built = os.path.join(_DIST, "index.html")
-    if os.path.isfile(built):
-        return FileResponse(built, headers=_NO_STORE)
-    return FileResponse(os.path.join(_STATIC, "index.html"), headers=_NO_STORE)
-
-
-@app.get("/api/ui")
-def ui_info():
-    """给界面/自检用：当前前端是构建版还是兜底版、以及构建时间。"""
-    p = os.path.join(_DIST, "index.html")
-    built = os.path.isfile(p)
-    return {"ok": True, "dist": _DIST, "built": built,
-            "built_at": (os.path.getmtime(p) if built else 0),
-            "assets": os.path.isdir(os.path.join(_DIST, "assets"))}
+    if not os.path.isfile(built):
+        return HTMLResponse(_NO_DIST_HTML, status_code=503)
+    return FileResponse(built, headers=_NO_STORE)
 
 
 if os.path.isdir(_DIST):

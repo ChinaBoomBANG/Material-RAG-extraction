@@ -314,11 +314,6 @@ def ensure_builtin() -> str:
     return p
 
 
-def specs_from(schema: SchemaDef) -> dict:
-    """便捷：SchemaDef -> 提取器 specs（仅为可读性保留）。"""
-    return schema.to_specs()
-
-
 # ---------------------------------------------------------------- 字段级编辑
 
 _KEY_SAFE = re.compile(r"[^\w\-]+", re.UNICODE)

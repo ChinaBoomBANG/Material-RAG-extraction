@@ -263,19 +263,3 @@ def canonical_unit(unit: str) -> str:
         return ""
     key = unit.strip().lower().replace(" ", "")
     return UNIT_ALIASES.get(key, unit.strip())
-
-
-# ---------------------------------------------------------------- 成分归一
-
-# 成分常见表示：余量 / Bal. / ≤0.05 / 0.15~0.25
-def composition_note(raw: str) -> str:
-    r = norm_text(raw)
-    if any(k in r for k in ("余量", "balance", "bal", "其余")):
-        return "balance"
-    if any(k in r for k in ("≤", "<=", "最大", "max", "不超过")):
-        return "upper_bound"
-    if any(k in r for k in ("≥", ">=", "最小", "min", "不低于")):
-        return "lower_bound"
-    if re.search(r"[~～\-–]|至|到", r):
-        return "range"
-    return "single"

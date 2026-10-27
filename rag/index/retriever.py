@@ -8,8 +8,6 @@ RRF（Reciprocal Rank Fusion）对两路排名做融合，无需调权重，稳�
 
 from __future__ import annotations
 
-import numpy as np
-
 from .. import config as cfg
 from ..models import Chunk
 from .embedder import Embedder

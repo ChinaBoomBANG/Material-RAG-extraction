@@ -33,6 +33,7 @@ _BUCKET_HINTS = (
     ("meta", ("meta", "material", "identity", "标识", "材料")),
 )
 
+# 非法字段键（含点号/空白）：schema/loader.py 校验用户手输字段时用
 _BAD_KEY = re.compile(r"[.\s]")
 
 

@@ -27,7 +27,6 @@ rank-bm25==0.2.2
 # --- Excel 读写 ---
 pandas==3.0.6
 openpyxl==3.1.5
-xlsxwriter==3.2.9
 
 # --- Web 服务与配置 ---
 fastapi==0.143.3
@@ -35,5 +34,3 @@ uvicorn[standard]==0.54.0
 pydantic==2.14.1
 PyYAML==6.0.3
 
-# --- 模型下载（scripts/fetch_embedding_model.py 用）---
-huggingface_hub==1.33.0

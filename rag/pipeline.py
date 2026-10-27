@@ -13,7 +13,7 @@ import re
 
 from . import config as cfg
 from .extract.extractor import Extractor
-from .extract.schema import FIELD_DICT, FieldSpec, build_schema_from_headers
+from .extract.schema import FieldSpec, build_schema_from_headers
 from .index.embedder import Embedder
 from .index.retriever import Retriever, format_context
 from .index.store import Store
@@ -26,16 +26,6 @@ from .schemas import builtin_schema, load_any
 #   .writeback.excel -> 拉起 pandas + openpyxl（约 485 ms）
 # 它们只在"解析 PDF"和"写 Excel"时才用得上，顶层导入会让每次启动白付这 0.5 秒。
 # 见 ingest() / extract() / writeback() 内的局部导入。
-
-# 关键词表（保留给其它用途参考；auto 模式不再单独依赖它）
-DATA_HINT = re.compile(
-    r"(MPa|GPa|HV|HB|wt\.?\s*%|at\.?\s*%|%IACS|g/cm|W/\(?m|"
-    r"时效|固溶|淬火|均匀化|挤压|轧制|退火|热处理|成分|合金|强度|硬度|伸长|延伸|"
-    r"晶粒|析出|再结晶|织构|腐蚀|疲劳|密度|电导|热导|"
-    r"aging|solution|quench|homogeni|extru|rolling|anneal|hardness|strength|"
-    r"elongation|grain|precipitat|recrystall|corrosion|fatigue|conductivit)",
-    re.I,
-)
 
 # auto 模式的判定：必须是「数字 + 单位」同时出现。
 # 只用关键词会误伤——材料论文几乎每页都有"合金/强度/热处理"这类词，

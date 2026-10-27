@@ -2,7 +2,7 @@
 import { computed, ref } from 'vue'
 import { api } from '../api'
 
-const props = defineProps({
+defineProps({
   llmName: { type: String, default: '' },
 })
 const emit = defineEmits(['error'])

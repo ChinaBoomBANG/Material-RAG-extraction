@@ -15,13 +15,6 @@ from __future__ import annotations
 import re
 import unicodedata
 
-RULE_LABELS = {
-    "trim": "去多余空格",
-    "unicode": "全半角/符号归一",
-    "space_in_number": "修数字内空格",
-    "strip_unit": "去重复单位",
-}
-
 # 只对「长得像数值/带单位」的串修内部空格，避免把 "Fig. 5" 也粘成 "Fig.5"
 _NUMISH = re.compile(r"^[\s±+\-]*(?:[<>≤≥~～]|约|approx\.?)?\s*[\d.,\s×xX^\-–—~±]+\s*[a-zA-Z%‰°³²/·]*$")
 

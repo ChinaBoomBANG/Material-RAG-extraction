@@ -47,8 +47,7 @@ RAG/
 │   ├── cli.py                  命令实现
 │   └── web/
 │       ├── app.py              FastAPI 后端（抽取任务 + SSE 进度 + 模板/会话 API）
-│       ├── dist/               Vite 构建产物（由后端托管）
-│       └── static/index.html   旧版单页（dist 缺失时兜底）
+│       └── dist/               Vite 构建产物（由后端托管，已入库）
 ├── web/                        前端源码（Vue3 + Vite + Tailwind）
 │   ├── src/App.vue             工作台：视图切换、任务接管、继续抽取
 │   ├── src/components/         SchemaPanel / RunPanel / ResultPanel / AskView / IndexView
@@ -56,7 +55,7 @@ RAG/
 ├── scripts/
 │   ├── fetch_embedding_model.py   下载 embedding 模型（hf-mirror 直链）
 │   ├── build_web.py               前端构建自动化（npm 探测 / 安装 / 构建 / 自检）
-│   └── selftest.py                不依赖 LLM 的全链路自测（148 项断言）
+│   └── selftest.py                不依赖 LLM 的全链路自测（191 项断言）
 └── data/
     ├── raw_pdfs/              放你的文献 PDF
     ├── index/                 索引产物（chunks / vectors / bm25 / docs）
@@ -424,10 +423,11 @@ extract:
 my_venv\Scripts\python.exe scripts/selftest.py
 ```
 
-共 **148 项断言**，覆盖：数值/区间/界限解析、单位归一、原文证据回链、物理合理性校验、
-表头映射、双栏阅读顺序、PDF 解析与表格识别、向量索引与混合检索、抽取证据链
-（含「编造字段必须被拦下」）、跨块记录合并、表格参考上下文、模板增删移与同名覆盖、
-Excel 备份/写入/逐格 diff、无表格时的终端渲染。**全部不依赖 LM Studio**，可离线跑。
+共 **191 项断言**，覆盖：数值/区间/界限解析、单位归一、原文证据回链、字段-数值对齐、
+成分常识校验（含「Si 被抽成 90 多必须拦下」）、表头映射、双栏阅读顺序、PDF 解析与表格识别、
+向量索引与混合检索、抽取证据链（含「编造字段必须被拦下」）、跨块记录合并、表格参考上下文、
+模板增删移与同名覆盖、Excel 备份/写入/逐格 diff、无表格时的终端渲染、启动脚本、
+SSE 事件补发、任务接管时效、结果落盘与重开恢复。**全部不依赖 LM Studio**，可离线跑。
 
 ---
 
@@ -481,7 +481,7 @@ Excel 备份/写入/逐格 diff、无表格时的终端渲染。**全部不依�
 
 ## 八、前端：构建与部署（Vue3 + Vite + Tailwind）
 
-界面源码在 `web/`，构建产物在 `rag/web/dist/`，由 FastAPI 在 `/` 上托管；**产物已入库，不装 Node 也能跑**（会自动退回旧版单页）。
+界面源码在 `web/`，构建产物在 `rag/web/dist/`，由 FastAPI 在 `/` 上托管；**产物已入库，不装 Node 也能跑**；产物缺失时首页会直接提示去执行 `build_web.bat`，不再有第二份「旧版单页」需要跟着改。
 
 ```bat
 :: 首次或改了前端之后：双击 build_web.bat，或
