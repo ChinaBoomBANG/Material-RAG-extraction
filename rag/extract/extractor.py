@@ -17,7 +17,9 @@ from concurrent.futures import ThreadPoolExecutor
 
 from ..llm.client import LLMClient
 from ..models import Chunk, Evidence, FieldValue, MaterialRecord
-from .normalize import (canonical_unit, composition_sum, parse_value, sanity_issue,
+from .align import alignment_issue
+from .normalize import (DEFAULT_MAX_WT, ELEMENT_MAX_WT, canonical_unit,
+                        composition_sum, parse_value, sanity_issue,
                         verify_quote, verify_raw)
 from .schema import ALLOY_SPEC, BY_KEY, FieldSpec, schema_brief
 
@@ -87,12 +89,25 @@ SYSTEM_PROMPT = """你是一名材料科学文献数据抄录员，唯一的工�
    该行没有标识就留空字符串。若表题写明了合金名（如 "... of A2 alloy"），
    把它作为该表所有记录的 row_label。
 9. 只输出 JSON，不要任何解释文字、不要 Markdown 代码块围栏。
-10. 字段清单之外的成分列，统一归入 RE 字段（若清单中有 RE 且类型为 text）：
+10. **按位置对齐**（成分字段尤其严格）：先找到字段对应的**列**（表头里
+    元素符号/中文名所在列），再取该列与当前行交叉的那个单元格。
+    字段名、数值、单位必须来自**同一个单元格或同一列的表头**。
+    - 表里**没有**该元素的列（也没有把它写在行首）→ 该字段留空，不要填；
+    - 单元格是 "–" / "n/a" / 空白 → 留空；
+    - 只有整行都对应不上、或看不出哪一列是这个字段时，才允许省略该字段，
+      并在 note 里写「未识别：<字段名>」。
+11. **单位以列为单位**：同一列的单位取该列表头括号里的单位（如 "Si (wt.%)"）；
+    表头没写单位、正文也没说明时 unit 留空，**不要从相邻列或别的量纲抄**
+    （kJ/mol、at.%、ppm 都不是 wt.%）。
+12. **不要跨量纲搬运**：数值必须带它自己的量纲含义。若某张表的数值量纲明显
+    不是质量分数（自由能 kJ/mol、原子比 at.%、温度 °C、强度 MPa），
+    这些数**不能**填进成分字段。
+13. 字段清单之外的成分列，统一归入 RE 字段（若清单中有 RE 且类型为 text）：
     表格里出现了清单中没有的元素列（如 Be、Ca、Sr、Ce 等不在清单里的元素）时，
     不要忽略，按「元素=数值」合并写进 RE，多个用英文分号分隔，
     如 "Be=0.05; Sr=0.01; Ce=0.2"；quote 取这些单元格所在行的原文片段。
     清单里没有 RE 字段、或表格没有清单外的成分列时，忽略本条，RE 留空。
-11. 标注「参考上下文·仅供理解·不得从中抽取」的文字**不是抽取对象**：
+14. 标注「参考上下文·仅供理解·不得从中抽取」的文字**不是抽取对象**：
     它只用来帮你判断表格里的单位、测试条件、样品对应关系（例如哪一组是预测值、
     时效温度是多少）。你**不得**从参考上下文里取任何数值填进字段——
     所有数据只能来自上方带 [序号] 的目标块。"""
@@ -262,6 +277,25 @@ class Extractor:
         out: list[MaterialRecord] = []
         pred_only = _pred_only_caption(texts[0] if texts else "")
 
+        # ---- 对齐 / 合理性校验的开关（都可在 config.yaml 的 extract 段调整）----
+        align_conf = self.conf["extract"].get("alignment") or {}
+        align_on = bool(align_conf.get("enabled", True)) and verify
+        align_groups = set(align_conf.get("groups") or ["composition"])
+        unconfirmed = str(align_conf.get("on_unconfirmed", "blank") or "blank")
+        san = self.conf["extract"].get("sanity") or {}
+        san_on = bool(san.get("enabled", True))
+        on_violation = str(san.get("on_violation", "drop") or "drop")
+        drop_row_if = int(san.get("drop_row_if_violations", 3) or 0)
+        sum_max = float(san.get("sum_max_wt", 105) or 105)
+        on_sum = str(san.get("on_sum_violation", "drop_row") or "drop_row")
+        limits = dict(ELEMENT_MAX_WT)
+        for k, v in (san.get("element_max_wt") or {}).items():
+            try:
+                limits[str(k)] = float(v)
+            except (TypeError, ValueError):
+                pass
+        default_max = float(san.get("default_max_wt", DEFAULT_MAX_WT) or DEFAULT_MAX_WT)
+
         for i, rr in enumerate(raw_records):
             if not isinstance(rr, dict):
                 continue
@@ -271,6 +305,7 @@ class Extractor:
                                  source_doc=chunks[0].doc_name,
                                  source_page=chunks[0].page,
                                  row_label=row_label)
+            violations = 0          # 本条记录里越界的成分字段数（用于整条丢弃）
             if pred_only:
                 rec.warnings.append("该表表题为预测性能，性能值记入 *_pred 字段（非实测）")
             for key, val in fields.items():
@@ -327,6 +362,22 @@ class Extractor:
                         f"字段 {key} 的 raw={raw!r} 未能在原文中逐字找到"
                         f"（疑似拼接/改写，已标记为不可信）")
 
+                # ---- 字段-数值对齐 ----
+                # 引文能在原文找到 ≠ 这个数属于这个字段。表头里根本没有 Si 这列时，
+                # 模型照样能填出 Si=93.5（源头是另一张 kJ/mol 的表）。
+                # 确认不了对应关系就留空并标注「未识别」——绝不猜一个填上。
+                if (align_on and key != "alloy"
+                        and (key.split(".", 1)[0] if "." in key else "properties") in align_groups):
+                    src = chunks[hit] if hit >= 0 else chunks[0]
+                    reason = alignment_issue(spec, quote, src.text or "",
+                                             getattr(src, "kind", "text"))
+                    if reason:
+                        if unconfirmed == "keep":
+                            rec.warnings.append(f"未识别：{reason}（保留原值，请人工复核）")
+                        else:
+                            rec.warnings.append(f"未识别：{reason}（已留空，未猜测填充）")
+                            continue
+
                 if key == "alloy":
                     rec.alloy = str(raw)          # 合金牌号单独存放，不入数据分组
                     continue
@@ -340,18 +391,21 @@ class Extractor:
                 # 铝合金成分表普遍不列 Al（余量），模型却会抓个数字填上，
                 # 引文校验照样通过——这层常识校验专门抓这种情况。
                 sv = parsed.get("value") if parsed["kind"] == "single" else parsed.get("raw")
-                issue = sanity_issue(key, sv, unit)
+                issue = sanity_issue(key, sv, unit, limits, default_max) if san_on else ""
                 if issue:
                     # 明显不符合常理的值不可能是真实数据，几乎都是"表不对题"的错位抽取。
                     # 实测：文献 Table 2 是 ΔGseg（晶界偏聚自由能，kJ/mol，含 −9.127），
-                    # 列名带 of Mg / of Si / of Cu，模型就把它塞进成分字段，引文还能逐字命中。
-                    # 质量分数不可能为负、也不可能超过 100 —— 这类值直接跳过，不生成字段。
-                    if (canonical_unit(unit) == "wt.%" and parsed["kind"] == "single"
-                            and isinstance(sv, (int, float)) and (sv < 0 or sv > 100)):
+                    # 列名带 of Mg / of Si / of Cu，模型就把它塞进成分字段，引文还能逐字命中；
+                    # 另一类是把 90 多的数当成 Si/Mg 的质量分数。
+                    # 质量分数为负、超过 100、或超出该元素常见上限 —— 这类值按配置直接删掉。
+                    hard = (canonical_unit(unit) == "wt.%" and parsed["kind"] == "single"
+                            and isinstance(sv, (int, float)))
+                    if hard and on_violation == "drop":
                         rec.warnings.append(
-                            f"常识校验：{issue}（已跳过该字段，未写入记录）")
+                            f"常识校验：{issue}（已删除该字段，未写入记录）")
+                        violations += 1
                         continue
-                    rec.warnings.append(f"常识校验：{issue}")
+                    rec.warnings.append(f"异常：{issue}（已保留，请人工复核）")
 
                 target = self._bucket(rec, key)
                 target[key.split(".", 1)[1] if "." in key else key] = fv
@@ -379,17 +433,41 @@ class Extractor:
                 })
                 continue
 
-            # ---- 成分合计校验：各元素 wt.% 加起来不该远超 100 ----
+            # ---- 合理性兜底：越界太多 / 成分合计远超 100，整条都不可信 ----
+            if drop_row_if and violations >= drop_row_if:
+                self.dropped.append({
+                    "doc": chunks[0].doc_name, "page": chunks[0].page,
+                    "row_label": row_label, "note": note[:40],
+                    "reason": f"成分越界字段达 {violations} 个，整条记录不可信（已删除）",
+                })
+                continue
+
             total = composition_sum(rec.composition)
-            if total is not None and total > 110:
+            if total is not None and total > sum_max:
+                if on_sum == "drop_row":
+                    self.dropped.append({
+                        "doc": chunks[0].doc_name, "page": chunks[0].page,
+                        "row_label": row_label, "note": note[:40],
+                        "reason": f"成分合计 {total:.1f} wt.% 超过上限 {sum_max:g}"
+                                  f"（疑似列错位或量纲错误，整条已删除）",
+                    })
+                    continue
                 rec.warnings.append(
-                    f"常识校验：成分合计 {total:.1f} wt.% 超过 100"
-                    f"（疑似列错位或把非成分数值当成了成分）")
+                    f"异常：成分合计 {total:.1f} wt.% 超过 {sum_max:g}"
+                    f"（疑似列错位或把非成分数值当成了成分，已保留待复核）")
 
             if note:
                 rec.warnings.append(f"条件说明：{note}")
             if any(rec.composition) or any(rec.process) or any(rec.microstructure) or any(rec.properties):
                 out.append(rec)
+            elif violations:
+                # 字段被越界/未识别规则删光后，这条记录会静默消失。
+                # 必须落到 dropped 里说明原因，否则"明明抽到了却一条都没有"无从查起。
+                self.dropped.append({
+                    "doc": chunks[0].doc_name, "page": chunks[0].page,
+                    "row_label": row_label, "note": note[:40],
+                    "reason": f"{violations} 个字段因越界被删除，该行已无有效数据（整条丢弃）",
+                })
         return out
 
     @staticmethod

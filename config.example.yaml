@@ -82,12 +82,39 @@ extract:
   verify_quotes: true             # 强制原文回链校验，不通过标记 unverified
   strict_no_invention: true       # 原文没有即置空，禁止推断
   max_evidence_chars: 400         # 单条证据引文最大长度
-  batch_chunks: 1                 # 每次送入模型的块数。12B 模型开 1：进程内只驻留一块，
-                                  # 既不会把内存/上下文挤爆，出错也容易定位到具体表格。
-  workers: 2                      # 并发请求数。同一批块实测：1 并发 9~10 条 / 418s，
-                                  # 2 并发 8 条 / 310s，3 并发 5~6 条 / 372s。
-                                  # 并发越高越快，但模型输出会变短、会少抽记录。
-                                  # 要最全 -> 1；要快 -> 2；>=3 明显丢数据，不推荐。
+  batch_chunks: 1                 # 每次送入模型的块数。本地小模型开 1；
+                                  # 云端不限流时可试 2~3（模板字段多时容易撞 max_tokens）
+  workers: 4                      # 默认并发请求数。云端不限流就往上加（4~8）；
+                                  # 被限流（429/超时）就调回 2~3。
+                                  # 注：本地 LM Studio 会把并发请求合批、把单次输出压短，
+                                  # 那条"3 并发少抽一半"的实测结论只适用于本地模型。
+  max_workers: 8                  # 并发硬上限：界面可选范围与后端都会夹到这个值
+
+  # 字段-数值对齐：确认"这个数值"确实属于"这个字段"才写入
+  alignment:
+    enabled: true
+    groups: [composition]         # 对哪些分组做对齐校验（默认只管成分，最易错位）
+    on_unconfirmed: blank         # blank/drop=留空并标注「未识别」；keep=保留并标注
+
+  # 合理性与一致性校验（后处理）
+  sanity:
+    enabled: true
+    on_violation: drop            # drop=删掉该字段值；flag=保留并标「异常」
+    sum_max_wt: 105               # 一条记录里成分合计 wt.% 的上限
+    on_sum_violation: drop_row    # drop_row=删整条；flag=只标异常
+    drop_row_if_violations: 3     # 一条记录里成分越界字段达此数就整条删（0=不按条删）
+    default_max_wt: 30            # 未列在 element_max_wt 里的元素默认上限
+    element_max_wt:
+      Si: 25
+      Mg: 12
+      Cu: 10
+      Zn: 12
+      Fe: 2
+      Mn: 2
+      Cr: 0.6
+      Ti: 0.4
+      Zr: 0.5
+      Ni: 4
   sec_per_chunk: 60               # 首次预估用（无实测值时）。跑过一次后以实测墙钟为准。
   max_records_per_chunk: 20       # 单块最多输出多少条记录。数据集范围表动辄几十行，
                                   # 不设上限时模型会一直生成直到撞 max_tokens，单块可达数分钟。

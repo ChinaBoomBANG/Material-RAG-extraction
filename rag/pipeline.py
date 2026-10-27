@@ -271,6 +271,9 @@ class RagPipeline:
 
         if workers is None:
             workers = int(cfg.get("extract.workers", 1) or 1)
+        # 并发硬上限：界面传多少都夹到配置范围内，避免一次开太多把云端配额打爆。
+        cap = int(cfg.get("extract.max_workers", 8) or 8)
+        workers = max(1, min(int(workers), cap))
 
         # 表格块的参考上下文：同页正文（只读 store，不改 chunk、不重建索引，
         # 因此索引与召回完全不受影响）。

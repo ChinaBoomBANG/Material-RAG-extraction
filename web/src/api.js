@@ -20,6 +20,7 @@ const post = (url, body) => json(url, { method: 'POST', body: JSON.stringify(bod
 
 export const api = {
   status: () => json('/api/status'),
+  config: () => json('/api/config'),
   llm: () => json('/api/llm'),
   ui: () => json('/api/ui'),
   docs: () => json('/api/docs'),

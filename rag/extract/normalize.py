@@ -182,12 +182,36 @@ MATRIX_MIN_WT = {
 }
 
 
-def sanity_issue(key: str, value, unit: str) -> str:
+# 铝合金中各元素的质量分数上限（wt.%）。超过就几乎不可能是真实成分：
+# 要么是列错位/单位错（kJ/mol、at.%、ppm 当成 wt.%），要么根本不是这张表的数。
+# 取值口径：按常见变形铝合金/铸造铝合金的**实际使用上限**再放宽一档，
+# 例如 Si 过共晶铝硅合金最高约 25，Mg 在 Al-Mg 系最高约 12，Fe/Mn 是杂质级。
+ELEMENT_MAX_WT: dict[str, float] = {
+    "Si": 25.0, "Mg": 12.0, "Cu": 10.0, "Zn": 12.0, "Fe": 2.0, "Mn": 2.0,
+    "Cr": 0.6, "Ti": 0.4, "Zr": 0.5, "Ni": 4.0, "Sc": 1.0, "Li": 4.0,
+    "V": 0.5, "Ga": 1.0, "Ca": 1.0, "Sr": 0.5, "Na": 0.1, "B": 0.5,
+    "Be": 0.5, "RE": 2.0, "Ce": 2.0, "La": 2.0, "Nd": 2.0, "Y": 2.0,
+    "Er": 1.0, "Ag": 1.0, "Sn": 1.0, "Pb": 1.0, "Bi": 1.0, "Co": 2.0,
+    "Mo": 1.0, "W": 1.0, "Nb": 0.5, "Ta": 0.5, "Cd": 1.0, "In": 1.0,
+    "Sb": 1.0, "Ge": 1.0, "P": 0.5, "S": 0.5, "C": 1.0, "N": 1.0,
+    "O": 1.0, "H": 0.1,
+}
+DEFAULT_MAX_WT = 30.0        # 表里没列到的元素：铝合金里 >30 wt.% 极不寻常
+
+
+def sanity_issue(key: str, value, unit: str,
+                 limits: dict[str, float] | None = None,
+                 default_max: float = DEFAULT_MAX_WT) -> str:
     """对单个字段值做常识校验，返回问题说明；没问题返回空串。
 
-    目前覆盖两类：
+    覆盖三类：
       1) 成分 wt.% 超出 0~100；
-      2) 基体元素（如 Al）低于合理下限。
+      2) 基体元素（如 Al）低于合理下限；
+      3) 元素质量分数超出该类合金常见上限（抓列错位/单位混淆：
+         实测 Si、Mg 被抽成 90 多，源头是 kJ/mol 的表被当成 wt.% 的成分表）。
+
+    limits 缺省用内置 ELEMENT_MAX_WT，可用 config 的 extract.sanity.element_max_wt
+    覆盖（不同合金体系区间不同，留了口子）。
     """
     if value is None:
         return ""
@@ -201,10 +225,19 @@ def sanity_issue(key: str, value, unit: str) -> str:
         return f"{key}={value} wt.% 超出 0~100，成分占比不可能为此值"
     bare = key.split(".", 1)[1] if "." in key else key
     low = MATRIX_MIN_WT.get(bare)
-    if low is not None and v < low:
-        return (f"{key}={value} wt.% 偏低：{bare} 作为基体通常 ≥{low:.0f} wt.%"
-                f"（原文可能未列 {bare}——含量以「余量/Bal.」表示，"
-                f"或此处是抽取错位/单位错误）")
+    if low is not None:
+        # 基体元素（Al）：只检查下限，不做上限——它本就该是 85~99 wt.%，
+        # 按"合金元素上限"去卡会把它误判成越界。
+        if v < low:
+            return (f"{key}={value} wt.% 偏低：{bare} 作为基体通常 ≥{low:.0f} wt.%"
+                    f"（原文可能未列 {bare}——含量以「余量/Bal.」表示，"
+                    f"或此处是抽取错位/单位错误）")
+        return ""
+    table = ELEMENT_MAX_WT if limits is None else limits
+    high = table.get(bare, default_max)
+    if high and v > high:
+        return (f"{key}={value} wt.% 超出 {bare} 的常见上限 {high:g} wt.%"
+                f"（疑似列错位/单位混淆：把别的量纲当成了质量分数）")
     return ""
 
 

@@ -271,8 +271,10 @@ def t_extract_verify():
         check("同一条记录里的正常字段不受影响",
               rec_neg.composition.get("Si") is not None,
               f"实得字段 {list(rec_neg.composition)}")
-        check("跳过不合理值时留下警告说明",
-              any("已跳过" in w and "超出 0~100" in w for w in rec_neg.warnings),
+        # 负值成分现在会被"对齐校验"（表头是 ΔGseg Gb of Mg，不是 Mg 这一列）
+        # 或"合理性校验"拦下，两者都留下了可追溯的说明文字。
+        check("跳过/留空不合理值时留下说明",
+              any("超出 0~100" in w or "未识别" in w for w in rec_neg.warnings),
               f"{rec_neg.warnings}")
 
 
@@ -987,6 +989,119 @@ def t_adopt_ttl() -> None:
         webapp._JOBS.update(saved)
 
 
+# ---------------------------------------------------------------- 18. 对齐 + 合理性
+
+_TAB = (
+    "[表格] Table 2 Chemical compositions of the alloys tested in this work, wt.%.\n"
+    "| Alloy | Si | Mg | Cu | Fe | Al |\n"
+    "|---|---|---|---|---|---|\n"
+    "| A1 | 0.62 | 0.85 | 0.11 | 0.21 | Bal. |\n"
+)
+_TAB_NO_SI = (
+    "[表格] Table 2 The ΔGseg of solute atoms at the grain boundary (kJ/mol).\n"
+    "| Element | of Mg | of Si | of Cu |\n"
+    "|---|---|---|---|\n"
+    "| value | -9.127 | -13.628 | -6.234 |\n"
+)
+
+
+def t_alignment() -> None:
+    """字段名必须能在表头/行首找到对应，否则判「未识别」——不许猜。"""
+    print("\n[18] 字段-数值对齐")
+    from rag.extract.align import alignment_issue
+    from rag.extract.schema import FieldSpec
+
+    si = FieldSpec(key="composition.Si", label="Si", group="composition",
+                   aliases=["硅", "Silicon"], kind="number", unit="wt.%")
+    mg = FieldSpec(key="composition.Mg", label="Mg", group="composition",
+                   aliases=["镁", "Magnesium"], kind="number", unit="wt.%")
+
+    check("表头有 Si 列 -> 可对齐", alignment_issue(si, "0.62", _TAB, "table") == "")
+    check("表头有 Mg 列 -> 可对齐", alignment_issue(mg, "0.85", _TAB, "table") == "")
+    bad = alignment_issue(si, "-13.628", _TAB_NO_SI, "table")
+    check("表头只有 of Si（不是 Si 列）-> 判未识别", bool(bad), bad[:40])
+    # 描述性长表头仍要认；能量/热力学列（ΔGseg）一律不认
+    long_tbl = ("[表格] Chemical composition\n"
+                "| Item | Mass fraction of Si | Mass fraction of Mg |\n|---|---|---|\n"
+                "| A1 | 0.62 | 0.85 |\n")
+    check("描述性表头 Mass fraction of Si -> 可对齐",
+          alignment_issue(si, "0.62", long_tbl, "table") == "")
+    # 元素写在行首（元素按行排的表）也要认
+    row_tbl = ("[表格] Chemical composition (wt.%)\n| Item | A1 | A2 |\n|---|---|---|\n"
+               "| Si | 0.62 | 0.71 |\n| Mg | 0.85 | 0.90 |\n")
+    check("元素写在行首 -> 可对齐", alignment_issue(si, "0.62", row_tbl, "table") == "")
+    # 正文块：引文上下文里要能找到字段写法
+    prose = ("The alloy contains 0.62 wt.% Si and 0.85 wt.% Mg in this study. "
+             + "The samples were homogenised at 550 C for 6 h and then water quenched. "
+             + "Tensile tests were carried out at room temperature with a strain rate "
+             + "of 1e-3 per second on an Instron machine, and the reported values are "
+             + "the average of three parallel specimens measured in this study.")
+    check("正文引文含字段名 -> 可对齐",
+          alignment_issue(si, "0.62 wt.% Si", prose, "text") == "")
+    check("正文引文上下文里没有字段名 -> 判未识别",
+          bool(alignment_issue(si, "on an Instron machine", prose, "text")))
+
+
+def t_sanity_range() -> None:
+    """成分越界（>100 / 超出元素常见上限）必须能被抓到并可整条丢弃。"""
+    print("\n[19] 合理性与一致性校验")
+    from rag.extract.normalize import ELEMENT_MAX_WT, sanity_issue
+
+    check("Si=0.62 wt.% 正常", sanity_issue("composition.Si", 0.62, "wt.%") == "")
+    check("Si=93.5 wt.% 超上限（用户实测的错值）",
+          "超出" in sanity_issue("composition.Si", 93.5, "wt.%", ELEMENT_MAX_WT))
+    check("Mg=95 wt.% 超上限",
+          "超出" in sanity_issue("composition.Mg", 95.0, "wt.%", ELEMENT_MAX_WT))
+    check("Si=-9.127 wt.% 负值被抓",
+          "超出 0~100" in sanity_issue("composition.Si", -9.127, "wt.%", ELEMENT_MAX_WT))
+    check("非 wt.% 字段不受成分上限影响",
+          sanity_issue("properties.UTS", 350.0, "MPa", ELEMENT_MAX_WT) == "")
+    check("上限可覆盖（Si 放到 30）",
+          sanity_issue("composition.Si", 28.0, "wt.%", {"Si": 30.0}) == "")
+
+    # 记录级：成分合计超过上限 -> 整条丢弃（写进 dropped）
+    from rag.extract.extractor import Extractor
+
+    conf = {"extract": {"verify_quotes": True, "max_evidence_chars": 400,
+                        "sanity": {"enabled": True, "on_violation": "drop",
+                                   "sum_max_wt": 105, "on_sum_violation": "drop_row",
+                                   "drop_row_if_violations": 3},
+                        "alignment": {"enabled": False}}}
+    ex = Extractor.__new__(Extractor)
+    ex.conf = conf
+    ex.dropped = []
+    ex.stopped_early = False
+    obj = {"records": [{"row_label": "A1", "fields": {
+        "composition.Si": {"raw": "93.5", "quote": "93.5"},
+        "composition.Mg": {"raw": "90.2", "quote": "90.2"},
+    }}]}
+    from rag.extract.schema import FieldSpec
+    from rag.models import Chunk
+
+    specs = {"composition.Si": FieldSpec(key="composition.Si", label="Si",
+                                         group="composition", kind="number", unit="wt.%"),
+             "composition.Mg": FieldSpec(key="composition.Mg", label="Mg",
+                                         group="composition", kind="number", unit="wt.%")}
+    ch = Chunk.make("d1", "x.pdf", 1, "text", "93.5 90.2")
+    recs = ex._to_records(obj, [ch], specs)
+    check("两个成分都越界 -> 整条丢弃", recs == [] and len(ex.dropped) == 1,
+          str(ex.dropped[:1]))
+    check("丢弃原因写清了合计/越界",
+          bool(ex.dropped) and ("合计" in ex.dropped[0]["reason"]
+                                or "越界" in ex.dropped[0]["reason"]),
+          ex.dropped[0]["reason"] if ex.dropped else "")
+
+    # 正常值不该被误删
+    ex.dropped = []
+    obj2 = {"records": [{"row_label": "A1", "fields": {
+        "composition.Si": {"raw": "0.62", "quote": "0.62"},
+        "composition.Mg": {"raw": "0.85", "quote": "0.85"},
+    }}]}
+    recs2 = ex._to_records(obj2, [ch], specs)
+    check("正常成分保留（不误删）", len(recs2) == 1 and len(ex.dropped) == 0,
+          f"留下 {len(recs2)} 条 / 丢弃 {len(ex.dropped)} 条")
+
+
 def main() -> int:
     tmp = tempfile.mkdtemp(prefix="ragtest_")
     try:
@@ -1007,6 +1122,8 @@ def main() -> int:
         t_launcher()
         t_job_stream()
         t_adopt_ttl()
+        t_alignment()
+        t_sanity_range()
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 

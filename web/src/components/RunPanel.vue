@@ -7,6 +7,7 @@ const props = defineProps({
   selected: { type: Array, default: () => [] },
   mode: { type: String, default: 'table' },
   workers: { type: Number, default: 2 },
+  maxWorkers: { type: Number, default: 8 },   // 可选并发上限，来自 config 的 extract.max_workers
   maxChunks: { type: Number, default: 0 },
   excelPath: { type: String, default: '' },
   running: { type: Boolean, default: false },
@@ -22,6 +23,23 @@ const emit = defineEmits(['update:selected', 'update:mode', 'update:workers',
 const advanced = ref(false)
 const plan = ref(null)
 const planErr = ref('')
+
+// 并发提示要分本地/云端：LM Studio 会把并发请求合批、把单次输出压短，
+// 云端没有这个机制，限制只来自配额。判断依据是 LLM 的 base_url。
+const llmIsLocal = computed(() =>
+  /127\.0\.0\.1|localhost|::1|0\.0\.0\.0/i.test(props.status?.llm?.base_url || ''))
+const workerNote = computed(() => (llmIsLocal.value
+  ? '本地 LM Studio 会把并发请求合批、输出被压短：实测 1 并发 9~10 条、2 并发 8 条、3 并发 5~6 条。'
+  : `云端按配额自行加；被限流（429）就调回 2~3。上限在 config.yaml 的 extract.max_workers（当前 ${props.maxWorkers}）。`))
+const workerWarn = computed(() => {
+  if (llmIsLocal.value && props.workers >= 3) {
+    return '≥3 并发在本地实测明显少抽记录（约少一半）。要完整数据请调回 1，慢但最全。'
+  }
+  if (!llmIsLocal.value && props.workers >= 6) {
+    return '并发很高时留意云端配额：返回 429/超时就往下调。'
+  }
+  return ''
+})
 
 const allChecked = computed(() =>
   props.docs.length > 0 && props.selected.length === props.docs.length)
@@ -258,16 +276,14 @@ const modes = [
       <div>
         <div class="mb-1 flex items-center justify-between text-[11.5px]">
           <span class="muted">并发请求数</span>
-          <span class="mono">{{ workers }}</span>
+          <span class="mono">{{ workers }} / {{ maxWorkers }}</span>
         </div>
-        <input type="range" min="1" max="4" step="1" :value="workers"
+        <input type="range" min="1" :max="maxWorkers" step="1" :value="workers"
                class="w-full accent-[var(--accent)]"
                @input="emit('update:workers', Number($event.target.value))" />
-        <div class="mt-0.5 text-[10.5px] muted">
-          并发越快，但模型输出会变短：同一批块实测 1 并发 9~10 条、2 并发 8 条、3 并发 5~6 条。
-        </div>
-        <div v-if="workers >= 3" class="mt-0.5 text-[10.5px]" :style="{ color: 'var(--err)' }">
-          ≥3 并发实测会明显少抽记录（约少一半）。要完整数据请调回 1，慢但最全。
+        <div class="mt-0.5 text-[10.5px] muted">{{ workerNote }}</div>
+        <div v-if="workerWarn" class="mt-0.5 text-[10.5px]" :style="{ color: 'var(--err)' }">
+          {{ workerWarn }}
         </div>
       </div>
 

@@ -33,6 +33,7 @@ const llm = ref(null)
 
 const mode = ref('table')
 const workers = ref(2)
+const maxWorkers = ref(8)   // 并发上限，来自 /api/config 的 extract.max_workers
 // 默认限 10 块：先小批量确认抽取质量，再点「不限」放开。本地模型逐块生成，
 // 不限量时几十块就是几十分钟，默认限速比默认全跑更符合实际使用节奏。
 const maxChunks = ref(10)
@@ -119,8 +120,16 @@ async function loadAll() {
       const first = templates.value[0].name
       await pickTemplate(first)
     }
-    const cfgWorkers = 2
-    workers.value = cfgWorkers
+    // 并发：默认取 config 的 extract.workers，可选上限取 extract.max_workers
+    try {
+      const cf = await api.config()
+      maxWorkers.value = Math.max(1, Number(cf.extract_max_workers) || 8)
+      workers.value = Math.min(maxWorkers.value,
+                               Math.max(1, Number(cf.extract_workers) || 2))
+    } catch (e) {
+      maxWorkers.value = 8
+      workers.value = 2
+    }
   } catch (e) {
     err.value = e.message
   }
@@ -434,6 +443,7 @@ onBeforeUnmount(() => { if (hbTimer) clearInterval(hbTimer) })
         <RunPanel
           class="h-[72vh] min-w-0 xl:h-full"
           :docs="docs" :selected="selected" :mode="mode" :workers="workers"
+          :max-workers="maxWorkers"
           :max-chunks="maxChunks" :excel-path="excelPath"
           :running="running" :stopping="stopping" :progress="progress" :status="status"
           :elapsed-sec="elapsedSec" :done-chunks="doneChunks"

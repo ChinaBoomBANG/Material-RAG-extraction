@@ -120,7 +120,11 @@ def get_config():
             "index_dir": cfg.path("project.index_dir"),
             "output_dir": cfg.path("project.output_dir"),
             "llm_base_url": c["llm"]["base_url"],
-            "embedding_backend": c["embedding"]["backend"]}
+            "embedding_backend": c["embedding"]["backend"],
+            # 并发/批处理：前端按云端配额给可选范围，后端再夹一层硬上限
+            "extract_workers": int(cfg.get("extract.workers", 2) or 2),
+            "extract_max_workers": int(cfg.get("extract.max_workers", 8) or 8),
+            "extract_batch_chunks": int(cfg.get("extract.batch_chunks", 1) or 1)}
 
 
 # ---------------------------------------------------------------- 索引
