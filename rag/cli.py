@@ -167,17 +167,24 @@ def cmd_fill(args) -> int:
     return 0
 
 
-def _is_our_service(url: str) -> bool:
-    """判断占用端口的服务是不是本项目（避免把别的程序误认成自己）。"""
+def _service_config(url: str) -> dict | None:
+    """端口占用者是本项目服务则返回它的 /api/config，否则 None。
+
+    只探 /api/config（轻量）：/api/status 会触发索引加载，预检阶段不该付这个代价。
+    走本地直连 opener：系统代理会让 127.0.0.1 的请求被转发出去而失败。
+    """
     import json
-    import urllib.request
+
+    from .llm.client import opener_for
 
     try:
-        with urllib.request.urlopen(f"{url}/api/config", timeout=3) as r:
+        with opener_for(url).open(f"{url}/api/config", timeout=3) as r:
             data = json.load(r)
-        return bool(data.get("ok") and "llm_base_url" in data)
+        if data.get("ok") and "llm_base_url" in data:
+            return data
     except Exception:
-        return False
+        pass
+    return None
 
 
 def cmd_serve(args) -> int:
@@ -187,7 +194,7 @@ def cmd_serve(args) -> int:
 
     import uvicorn
 
-    from .web.app import app
+    from .web.app import app, mark_ready
 
     host = args.host or cfg.get("web.host", "127.0.0.1")
     port = int(args.port or cfg.get("web.port", 8848))
@@ -205,7 +212,12 @@ def cmd_serve(args) -> int:
         in_use = False
 
     if in_use:
-        if _is_our_service(url):
+        remote = _service_config(url)
+        if remote is not None:
+            # 已有实例在跑：把它的 pid 写进就绪标记，告诉启动脚本"服务是活的"，
+            # 别空等 60 秒。老版本接口不带 pid 时退回 "running"（非数字=视为存活）。
+            # 静默启动（pythonw）时这个分支没有控制台，下面的提示只对命令行用户有用。
+            mark_ready(str(remote.get("pid") or "running"))
             print(f"[提示] {url} 已经有本项目的服务在运行（多半是之前的窗口还没关）。")
             print(f"       无需重复启动。")
             print(f"       若要重启，请先在原来的窗口按 Ctrl+C，或关掉它再运行本脚本。")

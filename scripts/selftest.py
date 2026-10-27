@@ -872,6 +872,29 @@ def t_chunk_plan(tmp: str):
         _J.update(_saved)
 
 
+# ---------------------------------------------------------------- 15. 启动脚本
+
+def t_launcher() -> None:
+    """start_web.vbs 必须保持纯 ASCII。
+
+    Windows Script Host 按系统 ANSI 代码页（cp936/GBK）解析 .vbs，不认 UTF-8。
+    UTF-8 中文被当成 GBK 双字节，奇数个汉字会留下一个悬空前导字节，把字符串的
+    收尾引号吞掉 → 800A0409「未结束的字符串常量」，脚本一行都执行不到。
+    """
+    print("\n[15] 启动脚本")
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    p = os.path.join(root, "start_web.vbs")
+    check("start_web.vbs 存在", os.path.isfile(p))
+    raw = open(p, "rb").read()
+    bad = [i for i, b in enumerate(raw) if b > 127]
+    check("start_web.vbs 为纯 ASCII（写中文会让 WSH 解析失败）", not bad,
+          f"非 ASCII 字节 {len(bad)} 个" if bad else "")
+    lines = raw.decode("ascii", "replace").splitlines()
+    odd = [i for i, ln in enumerate(lines, 1) if ln.count('"') % 2]
+    check("start_web.vbs 每行引号成对", not odd, f"行号 {odd}" if odd else "")
+    check("start_web.vbs 用文件标记判定就绪", "web.ready" in raw.decode("ascii", "replace"))
+
+
 def main() -> int:
     tmp = tempfile.mkdtemp(prefix="ragtest_")
     try:
@@ -889,6 +912,7 @@ def main() -> int:
         t_schemas(tmp)
         t_clean()
         t_chunk_plan(tmp)
+        t_launcher()
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 

@@ -67,30 +67,41 @@ def _err(e: Exception) -> JSONResponse:
 
 # ---------------------------------------------------------------- 状态
 
-@app.on_event("startup")
-def _write_ready_marker() -> None:
-    """服务真正就绪后写标记文件。
+def ready_marker_path() -> str:
+    return os.path.join(cfg.path("project.output_dir"), "web.ready")
 
-    启动脚本（start_web.vbs）改为轮询这个文件，而不是发 HTTP 请求：
-    VBS 里 WinHttp 的代理/超时行为不可控，检测一旦失效就会空等到超时上限
-    （用户侧表现为"双击后两三秒到几十秒才出页面"）。文件判定是纯本地操作，
-    毫秒级且没有网络语义可出错。
+
+def mark_ready(content: str = "") -> None:
+    """写就绪标记，内容是活着那个服务进程的 pid（外部实例写 "running"）。
+
+    启动脚本（start_web.vbs）轮询这个文件，而不是发 HTTP 请求：VBS 里 WinHttp
+    的代理/超时行为不可控，检测一旦失效就会空等到超时上限（用户侧表现为
+    "双击后两三秒到几十秒才出页面"）。文件判定是纯本地操作，毫秒级且没有网络
+    语义可出错。pid 用来让脚本识别"标记是上次强杀进程留下的残骸"。
     """
     try:
-        d = cfg.path("project.output_dir")
-        cfg.ensure_dir(d)
-        with open(os.path.join(d, "web.ready"), "w", encoding="utf-8") as f:
-            f.write(str(os.getpid()))
+        cfg.ensure_dir(cfg.path("project.output_dir"))
+        with open(ready_marker_path(), "w", encoding="utf-8") as f:
+            f.write(content or str(os.getpid()))
     except Exception:
         pass
+
+
+def clear_ready() -> None:
+    try:
+        os.remove(ready_marker_path())
+    except Exception:
+        pass
+
+
+@app.on_event("startup")
+def _on_startup() -> None:
+    mark_ready(str(os.getpid()))
 
 
 @app.on_event("shutdown")
-def _clear_ready_marker() -> None:
-    try:
-        os.remove(os.path.join(cfg.path("project.output_dir"), "web.ready"))
-    except Exception:
-        pass
+def _on_shutdown() -> None:
+    clear_ready()
 
 
 @app.get("/api/status")
@@ -105,6 +116,7 @@ def status():
 def get_config():
     c = cfg.load()
     return {"ok": True,
+            "pid": os.getpid(),
             "raw_dir": cfg.path("project.raw_dir"),
             "index_dir": cfg.path("project.index_dir"),
             "output_dir": cfg.path("project.output_dir"),

@@ -1,8 +1,21 @@
-' MaterialRAG silent launcher (double-click to run)
-' Starts the local server in the background with pythonw (no console window),
-' then opens the browser once the server writes its readiness marker.
+' MaterialRAG launcher (double-click to run).
+'
+' ============================================================================
+' KEEP THIS FILE PURE ASCII. No Chinese, no full-width punctuation, ever.
+'
+' Windows Script Host parses .vbs in the system ANSI codepage (cp936/GBK),
+' NOT UTF-8. A UTF-8 Chinese string read as GBK takes 3 bytes per char, so an
+' odd number of Chinese chars leaves one dangling lead byte that swallows the
+' closing quote, and the engine dies BEFORE running anything with
+' "Unterminated string constant" (0x800A0409). That is exactly what happened
+' when the log messages in this file were first translated to Chinese.
+' Chinese belongs in README / the web UI / logs written by Python (utf-8).
+' ============================================================================
+'
+' What it does: start the server with pythonw (no console window), then open
+' the browser as soon as the server drops its readiness marker.
 ' Logs: data\output\web.log (server) + data\output\launch.log (this script).
-' Stop: just close the browser page (idle -> exits after web.shutdown_grace_s,
+' Stop: close the browser page (idle -> exits after web.shutdown_grace_s,
 '       15s by default; it will NOT stop while an extraction is running).
 Option Explicit
 
@@ -32,21 +45,30 @@ launchLog = logDir & "\launch.log"
 
 t0 = Timer()
 
-' 已有服务在跑（上次没关干净 / 页面还开着）：标记文件还在，直接开浏览器。
+' A server that is still running (page still open, or a launch that just
+' happened) has left its readiness marker behind -> only open the browser.
+' The marker carries the pid, so a marker abandoned by a hard-killed process
+' (Task Manager, crash) is detected and discarded; otherwise the browser would
+' be pointed at a dead port ("127.0.0.1 refused to connect").
 If fso.FileExists(readyFile) Then
-    WriteLog "检测到就绪标记，认为服务已在运行，直接打开浏览器"
-    sh.Run "http://127.0.0.1:8848/", 1, False
-    WScript.Quit 0
+    If MarkerPidAlive() Then
+        WriteLog "ready marker present and its process is alive; opening browser only"
+        sh.Run "http://127.0.0.1:8848/", 1, False
+        WScript.Quit 0
+    End If
+    WriteLog "stale ready marker (its process is gone); removed it, starting a fresh server"
+    DeleteMarker
 End If
 
-WriteLog "开始启动服务"
+WriteLog "starting service: " & py & " -m rag.cli serve --port 8848"
 cmd = q & py & q & " -m rag.cli serve --port 8848 --no-browser --log-file " & q & logFile & q
 sh.Run cmd, 0, False
 
-' 轮询服务写下的就绪标记文件（最多 60 秒）。
-' 早先的做法是轮询 /api/status：VBS 里 WinHttp 的代理与超时行为不可控，
-' 一旦某次探测失败/卡住，就只能耗到上限才开浏览器（用户侧就是"双击后很久没反应"）。
-' 文件判定是纯本地操作，不存在网络语义，可靠且是毫秒级。
+' Poll the readiness marker the server writes on startup (100ms x 600 = 60s cap).
+' Earlier versions polled /api/status: WinHTTP proxy/timeout behaviour is not
+' controllable from VBS, so one stuck probe meant waiting out the full timeout
+' (which the user experiences as "nothing happens after double-click"). A local
+' file-existence check has no network semantics at all and is millisecond-level.
 waited = 0
 Do While waited < 60000
     If fso.FileExists(readyFile) Then Exit Do
@@ -55,19 +77,48 @@ Do While waited < 60000
 Loop
 
 If fso.FileExists(readyFile) Then
-    WriteLog "服务就绪，等待 " & FormatNumber(Timer() - t0, 2) & " 秒"
+    WriteLog "service ready after " & FormatNumber(Timer() - t0, 2) & " s"
 Else
-    WriteLog "等待 " & FormatNumber(Timer() - t0, 2) & " 秒仍未就绪，仍尝试打开浏览器（服务可能启动失败，请看 web.log）"
+    WriteLog "still not ready after " & FormatNumber(Timer() - t0, 2) & _
+             " s; opening the browser anyway (the service probably failed to start - see web.log)"
 End If
 
 sh.Run "http://127.0.0.1:8848/", 1, False
-WriteLog "已打开浏览器，脚本总耗时 " & FormatNumber(Timer() - t0, 2) & " 秒"
+WriteLog "browser opened; script total " & FormatNumber(Timer() - t0, 2) & " s"
+
+' True when the marker names a process that is still running.
+' Non-numeric content counts as alive: the server only writes the marker while
+' it runs (an external instance writes "running").
+' If WMI cannot answer, report alive - the conservative choice. Opening the
+' browser at worst lands on a dead port; starting a second server would leave
+' two processes fighting over the same port and the same pid file.
+Function MarkerPidAlive()
+    MarkerPidAlive = True
+    On Error Resume Next
+    Dim tf, pidText, svc, procs
+    Set tf = fso.OpenTextFile(readyFile, 1, False)
+    pidText = Trim(tf.ReadAll)
+    tf.Close
+    If Not IsNumeric(pidText) Then Exit Function
+    Set svc = GetObject("winmgmts:\\.\root\cimv2")
+    If Err.Number <> 0 Then Exit Function
+    Set procs = svc.ExecQuery("SELECT ProcessId FROM Win32_Process WHERE ProcessId=" & CLng(pidText))
+    If Err.Number <> 0 Then Exit Function
+    MarkerPidAlive = (procs.Count > 0)
+    On Error GoTo 0
+End Function
+
+Sub DeleteMarker()
+    On Error Resume Next
+    fso.DeleteFile readyFile, True
+    On Error GoTo 0
+End Sub
 
 Sub WriteLog(msg)
     On Error Resume Next
-    Dim f
-    Set f = fso.OpenTextFile(launchLog, 8, True)
-    f.WriteLine Now & "  " & msg
-    f.Close
+    Dim lf
+    Set lf = fso.OpenTextFile(launchLog, 8, True)
+    lf.WriteLine Now & "  " & msg
+    lf.Close
     On Error GoTo 0
 End Sub
