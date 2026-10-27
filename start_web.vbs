@@ -54,7 +54,7 @@ Function ServerReady()
     Dim w
     Set w = CreateObject("WinHttp.WinHttpRequest.5.1")
     w.SetAutoLogProxy 0
-    w.SetTimeouts 500, 500, 1000, 1000
+    w.SetTimeouts 500, 500, 1500, 2500
     w.Open "GET", "http://127.0.0.1:8848/api/status", False
     w.Send
     ServerReady = (Err.Number = 0)

@@ -74,9 +74,11 @@ const elapsedSec = computed(() => {
 
 // 继续抽取：记录上一批实际抽到的块数（skip = 已完成的块数）
 const doneChunks = ref(0)
-// 改了抽取范围（文献/模式/块数）后，「已抽 N 块」这个位置就失去意义了：
-// 块列表变了，原来的 skip 会跳到错误的位置，所以必须归零重新计数。
-watch([selected, mode, maxChunks], () => { doneChunks.value = 0 })
+// 改了抽取范围（文献 / 模式）后，「已抽 N 块」的位置就失去意义了：
+// 块列表本身变了，原来的 skip 会跳到错误的位置，所以必须归零重新计数。
+// 注意：只监听 selected / mode —— 「最大抽块数」只决定本次抽多少，
+// 不改变块列表顺序，skip 语义仍然成立，重置它会让"继续抽取"白白消失。
+watch([selected, mode], () => { doneChunks.value = 0 })
 
 const statLine = computed(() => {
   const s = status.value?.index

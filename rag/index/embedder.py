@@ -120,16 +120,20 @@ class Embedder:
 
         parts: list[np.ndarray] = []
         total = len(texts)
+        # 本地地址必须绕过系统代理，否则模型服务未启动时请求会在代理里干等到超时。
+        from ..llm.client import opener_for
+        url = f"{base}/embeddings"
+        opener = opener_for(url)
         for i in range(0, total, bs):
             batch = texts[i:i + bs]
             body = json.dumps({"model": model, "input": batch}).encode("utf-8")
             req = urllib.request.Request(
-                f"{base}/embeddings", data=body,
+                url, data=body,
                 headers={"Content-Type": "application/json",
                          "Authorization": f"Bearer {api_key}"},
                 method="POST")
             try:
-                with urllib.request.urlopen(req, timeout=timeout) as r:
+                with opener.open(req, timeout=timeout) as r:
                     data = json.load(r)
             except urllib.error.URLError as e:
                 raise RuntimeError(
@@ -150,7 +154,9 @@ class Embedder:
         return vecs
 
     def _pick_embedding_model(self, base: str) -> str:
-        with urllib.request.urlopen(f"{base}/models", timeout=15) as r:
+        from ..llm.client import opener_for
+        url = f"{base}/models"
+        with opener_for(url).open(url, timeout=15) as r:
             data = json.load(r)
         ids = [m["id"] for m in data.get("data", [])]
         prefer = [i for i in ids if "embed" in i.lower() or "bge" in i.lower()]

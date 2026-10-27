@@ -13,6 +13,7 @@ import json
 import re
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 from .. import config as cfg
@@ -22,6 +23,42 @@ _JSON_BLOCK = re.compile(r"```(?:json)?\s*(.+?)```", re.S)
 
 class LLMError(RuntimeError):
     pass
+
+
+_LOCAL_HOSTS = {"127.0.0.1", "localhost", "::1", "0.0.0.0"}
+
+
+def opener_for(url: str):
+    """按目标地址选择 opener：本地地址**不走代理**。
+
+    为什么必须这样做：Windows 上设了系统代理后，urllib 会把 127.0.0.1 也交给代理
+    （实测 `proxy_bypass('127.0.0.1:1234')` 返回 False）。模型服务在线时代理能转发，
+    一旦模型没启动，请求就在代理里干等，把界面状态接口和启动轮询一起拖死。
+    """
+    host = (urllib.parse.urlparse(url).hostname or "").lower()
+    if host in _LOCAL_HOSTS:
+        return urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    return urllib.request.build_opener()
+
+
+def _probe_port(url: str, timeout: float = 0.35) -> str | None:
+    """快速探测 TCP 端口是否可连。可连返回 None，不可连通返回原因字符串。
+
+    用途：避免为"服务根本没起来"这种情况付出 HTTP 层的整套超时代价。
+    """
+    import socket
+
+    u = urllib.parse.urlparse(url)
+    host = (u.hostname or "127.0.0.1").lower()
+    port = u.port or (443 if u.scheme == "https" else 80)
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.settimeout(timeout)
+            if s.connect_ex((host, port)) != 0:
+                return f"无法连接 {host}:{port}（服务未启动？）"
+    except OSError as e:
+        return f"连接 {host}:{port} 失败：{e}"
+    return None
 
 
 class LLMClient:
@@ -44,12 +81,14 @@ class LLMClient:
     def _post(self, path: str, payload: dict, timeout: int | None = None) -> dict:
         url = f"{self.base_url}{path}"
         data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-        req = urllib.request.Request(url, data=data, headers=self._headers(), method="POST")
         t = timeout or int(self.gen.get("timeout_s", 600))
+        opener = opener_for(url)
         last_err: Exception | None = None
         for attempt in range(int(self.gen.get("retries", 2)) + 1):
+            # 重试时重新构造 Request：RequestBody 可能已被上一次尝试消费。
+            req = urllib.request.Request(url, data=data, headers=self._headers(), method="POST")
             try:
-                with urllib.request.urlopen(req, timeout=t) as r:
+                with opener.open(req, timeout=t) as r:
                     return json.load(r)
             except urllib.error.HTTPError as e:
                 body = ""
@@ -71,8 +110,9 @@ class LLMClient:
     # ---------------------------------------------------------- 模型发现
 
     def list_models(self) -> list[str]:
-        req = urllib.request.Request(f"{self.base_url}/models", headers=self._headers())
-        with urllib.request.urlopen(req, timeout=15) as r:
+        url = f"{self.base_url}/models"
+        req = urllib.request.Request(url, headers=self._headers())
+        with opener_for(url).open(req, timeout=15) as r:
             data = json.load(r)
         return [m.get("id", "") for m in data.get("data", [])]
 
@@ -86,6 +126,12 @@ class LLMClient:
         return self.model
 
     def health(self) -> dict:
+        # 先做毫秒级端口探测：服务没起来时，HTTP 层连接要等约 2 秒才报错
+        # （实测未监听的本地端口连接耗时 2.0s）。界面状态接口会被这 2 秒拖住，
+        # 启动脚本轮询跟着超时，表现就是"双击后长时间没反应"。
+        probe = _probe_port(self.base_url, timeout=0.35)
+        if probe is not None:
+            return {"ok": False, "base_url": self.base_url, "error": probe}
         try:
             ids = self.list_models()
             return {"ok": True, "base_url": self.base_url,
@@ -134,6 +180,7 @@ class LLMClient:
         except (KeyError, IndexError) as e:
             # 带上实际请求地址：最常见的坑是 base_url 少了 /v1，
             # 服务端会回 "Unexpected endpoint or method"，光看响应体根本看不出原因。
+            url = f"{self.base_url}/chat/completions"
             hint = ""
             if not url.rstrip("/").endswith("/v1") and "/v1/" not in url:
                 hint = (f"（提示：base_url={self.base_url!r} 似乎缺少 /v1，"

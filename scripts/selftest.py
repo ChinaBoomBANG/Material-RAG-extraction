@@ -803,6 +803,19 @@ def t_chunk_plan(tmp: str):
         _raised = True
     check("块与向量不同步时拒绝写入（防检索返回错误块）", _raised)
 
+    # ---- 模型不可达时，健康检查必须快速返回 ----
+    # 曾踩过：本地端口未监听时 HTTP 连接要等约 2 秒，界面状态接口被拖住，
+    # 启动脚本轮询（超时 1 秒）每次都失败，表现成"双击 start_web.vbs 没反应"。
+    import time as _time
+    from rag.llm.client import LLMClient as _LLM
+    _probe_client = _LLM()
+    _probe_client.base_url = "http://127.0.0.1:19999/v1"     # 故意不可达
+    _t0 = _time.time()
+    _h = _probe_client.health()
+    _dt = _time.time() - _t0
+    check("模型不可达时 health 快速返回（<1 秒）",
+          (not _h.get("ok")) and _dt < 1.0, f"{_dt:.2f}s, ok={_h.get('ok')}")
+
     # ---- 刷新后接管任务：_running_job 的状态判定 ----
     from rag.web.app import _running_job as _rj, _JOBS as _J
     _saved = dict(_J)
