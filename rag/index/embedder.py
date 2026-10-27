@@ -112,7 +112,8 @@ class Embedder:
         # embedding 有自己的地址与密钥：留空时沿用 llm 的（向后兼容）。
         # 这样把 llm.base_url 改成云端 API 时，向量化仍然留在本机，不会跟着上云。
         base = str(emb.get("base_url") or llm["base_url"]).rstrip("/")
-        api_key = emb.get("api_key") or llm.get("api_key", "lm-studio")
+        api_key = (emb.get("api_key") or os.environ.get("RAG_API_KEY")
+                   or llm.get("api_key", "lm-studio"))
         model = emb.get("lmstudio_model") or self._pick_embedding_model(base)
         timeout = int(emb.get("timeout_s", 120) or 120)
         # 必须分批：整库上万块一次性发送会产生十几 MB 的请求体，

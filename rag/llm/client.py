@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import socket
 import time
@@ -75,7 +76,9 @@ class LLMClient:
     def __init__(self, conf: dict | None = None):
         self.conf = conf or cfg.load()
         self.base_url = self.conf["llm"]["base_url"].rstrip("/")
-        self.api_key = self.conf["llm"].get("api_key", "")
+        # 密钥优先级：环境变量 > 配置文件。
+        # 仓库是公开的，把真密钥写进 config.yaml 极易误提交；设 RAG_API_KEY 即可。
+        self.api_key = os.environ.get("RAG_API_KEY") or self.conf["llm"].get("api_key", "")
         self.model = self.conf["llm"].get("model", "") or ""
         self.gen = self.conf["llm"]["gen"]
         self._resolved = bool(self.model)
@@ -122,10 +125,10 @@ class LLMClient:
 
     # ---------------------------------------------------------- 模型发现
 
-    def list_models(self) -> list[str]:
+    def list_models(self, timeout: int = 15) -> list[str]:
         url = self._url("/models")
         req = urllib.request.Request(url, headers=self._headers())
-        with opener_for(url).open(req, timeout=15) as r:
+        with opener_for(url).open(req, timeout=timeout) as r:
             data = json.load(r)
         return [m.get("id", "") for m in data.get("data", [])]
 
@@ -144,15 +147,17 @@ class LLMClient:
         if (_HEALTH_CACHE["val"] is not None and _HEALTH_CACHE["key"] == key
                 and now - _HEALTH_CACHE["ts"] < ttl):
             return _HEALTH_CACHE["val"]
-        # 先做毫秒级端口探测：服务没起来时，HTTP 层连接要等约 2 秒才报错
-        # （实测未监听的本地端口连接耗时 2.0s）。界面状态接口会被这 2 秒拖住，
-        # 启动脚本轮询跟着超时，表现就是"双击后长时间没反应"。
-        probe = _probe_port(self.base_url)
+        # 端口探测只对本地回环做：本地服务没起来时 HTTP 连接要等约 2 秒才报错，
+        # 每次状态查询都被这 2 秒拖住（启动脚本轮询跟着超时）。
+        # 云端不能这样探：那需要真的走网络/代理，裸 socket 探测会误判成"连不上"
+        # （实测云端健康检查本身只要 0.28 秒，直接请求更准也更快）。
+        host = (urllib.parse.urlparse(self.base_url).hostname or "").lower()
+        probe = _probe_port(self.base_url) if host in _LOCAL_HOSTS else None
         if probe is not None:
             val = {"ok": False, "base_url": self.base_url, "error": probe}
         else:
             try:
-                ids = self.list_models()
+                ids = self.list_models(timeout=6 if host not in _LOCAL_HOSTS else 15)
                 val = {"ok": True, "base_url": self.base_url,
                        "models": ids, "using": self.model or (ids[0] if ids else None)}
             except Exception as e:
@@ -161,6 +166,76 @@ class LLMClient:
         return val
 
     # ---------------------------------------------------------- 生成
+
+    def _stream_post(self, path: str, payload: dict, timeout: int | None = None) -> str:
+        """流式请求，边收边拼。
+
+        为什么必须支持流式：非流式时服务端会把整个回复生成完才返回响应头，
+        客户端全程卡在 `_read_status` 上毫无反馈。实测云端返回一个 101 字段的
+        JSON 要 5 分钟以上，界面看起来就是"卡死"，也无法判断是在算还是断线了。
+        流式下响应头立刻返回，且 socket 超时对"每次读取"生效——模型超过
+        timeout_s 秒没有吐新内容就会中断，而不是无限等下去。
+        """
+        url = self._url(path)
+        data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        t = timeout or int(self.gen.get("timeout_s", 600))
+        req = urllib.request.Request(url, data=data, headers=self._headers(), method="POST")
+
+        parts: list[str] = []
+        reasoning_len = 0
+        raw_lines: list[str] = []
+        try:
+            with opener_for(url).open(req, timeout=t) as r:
+                for raw in r:
+                    line = raw.decode("utf-8", "ignore").strip()
+                    if not line:
+                        continue
+                    raw_lines.append(line)
+                    if not line.startswith("data:"):
+                        continue
+                    chunk = line[5:].strip()
+                    if chunk == "[DONE]":
+                        break
+                    try:
+                        obj = json.loads(chunk)
+                    except json.JSONDecodeError:
+                        continue
+                    if isinstance(obj, dict) and obj.get("error"):
+                        raise LLMError(f"流式返回错误：{str(obj['error'])[:300]}")
+                    for ch in (obj.get("choices") or []):
+                        delta = ch.get("delta") or {}
+                        if delta.get("content"):
+                            parts.append(delta["content"])
+                        rc = delta.get("reasoning_content") or delta.get("reasoning")
+                        if rc:
+                            reasoning_len += len(rc)
+        except urllib.error.HTTPError as e:
+            body = ""
+            try:
+                body = e.read().decode("utf-8", "ignore")[:400]
+            except Exception:
+                pass
+            raise LLMError(f"HTTP {e.code}：{body}") from e
+        except urllib.error.URLError as e:
+            raise LLMError(f"流式请求失败（{url}）：{e}") from e
+
+        text = "".join(parts)
+        if text:
+            return text
+        # 服务端可能根本不支持 SSE（直接回了整包 JSON）：退回解析原始响应体。
+        joined = "".join(raw_lines)
+        if joined.startswith("{"):
+            try:
+                resp = json.loads(joined)
+                return resp["choices"][0]["message"]["content"] or ""
+            except Exception:
+                pass
+        if reasoning_len:
+            raise LLMError(
+                f"模型只返回了思考内容（{reasoning_len} 字符）、正文为空。"
+                f"这是推理型模型的典型表现：思考占满了 max_tokens 预算。"
+                f"请调大 max_tokens，或换成非推理模型。")
+        raise LLMError(f"流式返回为空（{url}）")
 
     def chat(self, user: str, system: str = "", temperature: float | None = None,
              max_tokens: int | None = None,
@@ -175,7 +250,7 @@ class LLMClient:
             "temperature": self.gen.get("temperature", 0.1) if temperature is None else temperature,
             "top_p": self.gen.get("top_p", 0.9),
             "max_tokens": int(self.gen.get("max_tokens", 2048)) if max_tokens is None else max_tokens,
-            "stream": False,
+            "stream": bool(self.gen.get("stream", True)),
         }
         # 推理型模型（如 gemma-4）会把全部 token 预算耗在内部思考上，正文一个字
         # 都出不来。reasoning_effort="none" 可让 LM Studio 关掉思考；
@@ -183,19 +258,39 @@ class LLMClient:
         effort = str(self.gen.get("reasoning_effort", "") or "").strip()
         if effort:
             payload["reasoning_effort"] = effort
+        # 推理型云端模型（qwen3 系列等）默认会长时间"思考"，而且思考阶段服务端
+        # 不推送任何 SSE 事件——客户端只能干等。实测 qwen3.8-max 面对 101 字段的
+        # 抽取任务，思考超过 200 秒仍未开始输出；关掉后同样任务 17 秒完成。
+        if self.gen.get("disable_thinking", True):     # 默认关：不关会长时间无响应
+            payload["enable_thinking"] = False
         # 结构化输出：云端 API 支持 response_format（json_object），能显著减少
         # "模型输出带解释文字/Markdown 围栏" 引发的解析失败。部分本地服务不支持，
         # 返回 4xx 时自动去掉该字段重试一次，保证兼容性。
         if response_format:
             payload["response_format"] = response_format
-        try:
-            resp = self._post("/chat/completions", payload)
-        except LLMError as e:
-            if response_format and "HTTP 4" in str(e):
-                payload.pop("response_format", None)
-                resp = self._post("/chat/completions", payload)
-            else:
-                raise
+        # 扩展字段（enable_thinking / response_format）不一定被所有服务端支持，
+        # 遇到 4xx 就逐个剔除后重试，保证换服务商时不用改代码。
+        def _send() -> str:
+            while True:
+                try:
+                    if payload["stream"]:
+                        return self._stream_post("/chat/completions", payload)
+                    return self._json_content(self._post("/chat/completions", payload))
+                except LLMError as e:
+                    dropped = False
+                    if "HTTP 4" in str(e):
+                        for key in ("enable_thinking", "response_format"):
+                            if key in payload:
+                                payload.pop(key)
+                                dropped = True
+                                break
+                    if not dropped:
+                        raise
+
+        return _send()
+
+    def _json_content(self, resp: dict) -> str:
+        """从非流式响应里取正文；结构异常时带上请求地址，便于定位配置错误。"""
         try:
             return resp["choices"][0]["message"]["content"]
         except (KeyError, IndexError) as e:

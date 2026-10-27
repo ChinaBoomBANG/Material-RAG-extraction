@@ -72,12 +72,26 @@ RAG/
 
 ## 二、快速开始
 
-> **首次运行请先确认 `config.yaml` 的 `llm` 与 `embedding` 两段。**
-> 默认配置指向**本地 LM Studio**（`base_url: http://127.0.0.1:1234/v1`，`api_key` 任意值、不校验），
-> 因此需要先在 LM Studio 里加载一个对话模型，并把 `llm.model` 改成该模型名；`embedding` 默认也走
-> LM Studio，需要再加载一个 embedding 模型并填进 `embedding.lmstudio_model`。
-> 若改用云端 API：填服务商的 OpenAI 兼容地址与密钥（**记得带 `/v1`**），并**清空 `gen.reasoning_effort`**
-> ——那是 LM Studio 专用参数，云端收到会返回 400。改动后重启服务生效。
+> **首次运行：`config.yaml` 不在仓库里**（它含密钥，已列入 `.gitignore`）。
+> 先复制模板再改：
+>
+> ```bat
+> copy config.example.yaml config.yaml
+> ```
+>
+> **密钥请用环境变量 `RAG_API_KEY`**，不要写进 `config.yaml`——这个仓库是公开的：
+>
+> ```bat
+> setx RAG_API_KEY "你的密钥"        :: 设一次，之后新开的窗口都生效
+> ```
+>
+> 其余按需改 `llm` 段：本地 LM Studio 填 `http://127.0.0.1:1234/v1`（`api_key` 留空即可，它不校验），
+> 并在 LM Studio 里加载对话模型、把 `llm.model` 填成该模型名；`embedding` 默认也走 LM Studio，
+> 需要再加载一个 embedding 模型。
+>
+> 用云端 API 时：`base_url` **必须带 `/v1`**，并**清空 `gen.reasoning_effort`**（LM Studio 专用，
+> 云端收到会 400）。**推理型模型（qwen3 等）依赖 `gen.disable_thinking` 关思考**——不关会长时间
+> 无响应（实测 qwen3.8-max 面对 101 字段抽取任务思考超过 200 秒仍无输出，关掉后 58 秒完成）。
 > 换 embedding 模型后必须重建索引（维度会变）。
 
 ### 0. 准备（只需一次）

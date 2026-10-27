@@ -60,18 +60,22 @@ llm:
   # openai_compat：任何 OpenAI 兼容服务。默认指向本机 LM Studio，也可自行配置云端大模型。
   # 数据是否离开本机，由 base_url 决定，请自行确认。
   backend: "openai_compat"
-  base_url: "http://127.0.0.1:1234/v1"        # 必须带 /v1（OpenAI 兼容路径）；云端填服务商的对应地址
-  api_key: "light"            # LM Studio 不校验，占位即可
-  model: "google/gemma-4-12b-qat" # 留空 => 自动取 /v1/models 的第一个模型
+  base_url: "https://YOUR-ENDPOINT/v1"        # 必须带 /v1（OpenAI 兼容路径）；云端填服务商的对应地址
+  api_key: ""                 # 密钥请用环境变量 RAG_API_KEY
+  model: "YOUR-MODEL-ID" # 留空 => 自动取 /v1/models 的第一个模型
   gen:                   # 配置云端大模型时，这里的参数可修改，按云端模型上限修改
     temperature: 0.1
     top_p: 0.9
     max_tokens: 6144             # 预测值+实测值并列的表输出更长；2048 会截断成空记录
-    timeout_s: 900               # 6144 token 按 8.6 tok/s 约需 480s，留足余量
-    retries: 1                   # 抽取失败不反复重试，宁可报错也不要把整篇拖成几十分钟
+    timeout_s: 120               # 流式下的"停滞超时"：多久没收到新内容就判定失败
+    stream: true                 # 流式接收：非流式会让客户端在生成完之前毫无反馈（实测卡 5 分钟）
+    retries: 2                   # 抽取失败不反复重试，宁可报错也不要把整篇拖成几十分钟
     # 推理型模型必须关掉思考：否则 token 全花在 reasoning 上，正文一个字都出不来
     # （实测 gemma-4-12b-qat 用满 2048 token 思考、输出 0 字）。留空则不发送该字段。
-    reasoning_effort: "none"    # 调用大模型时，此处参数【必须清空】
+    reasoning_effort: ""    # LM Studio 专用；接云端时必须清空（云端收到会 400）
+    # 云端推理型模型（qwen3 等）必须关思考：它面对多字段抽取时会长时间"思考"，
+    # 且思考阶段服务端不推送 SSE，客户端只能干等（实测 >200 秒无响应）。
+    disable_thinking: true
 
 # ---------------- 数据抽取 ----------------
 extract:
