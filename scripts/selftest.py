@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import copy
+import json
 import os
 import shutil
 import sys
@@ -1102,6 +1103,94 @@ def t_sanity_range() -> None:
           f"留下 {len(recs2)} 条 / 丢弃 {len(ex.dropped)} 条")
 
 
+# ---------------------------------------------------------------- 20. 结果落盘
+
+def t_result_persist() -> None:
+    """关页面 -> 服务自停 -> 重开：上一批结果必须还在（不能只剩「继续抽取」按钮）。"""
+    print("\n[20] 结果落盘与重开恢复")
+    import tempfile as _tf
+
+    from rag.web import app as webapp
+
+    tmpdir = _tf.mkdtemp(prefix="ragtest_result_")
+    p = os.path.join(tmpdir, "last_extract.json")
+    orig_path, orig_jobs = webapp._last_result_path, dict(webapp._JOBS)
+    orig_done = webapp._RESTORED_DONE
+    try:
+        webapp._last_result_path = lambda: p
+        webapp._JOBS.clear()
+
+        def job(skip, ids):
+            return {"started_at": 1000.0, "finished_at": 1100.0,
+                    "done_ids": list(ids), "req": {"skip_ids": skip}}
+
+        # 第一批（全新开始）
+        webapp._save_last_result("j1", job([], ["c1", "c2"]),
+                                 {"headers": ["合金", "Si"], "rows": [{"合金": "A1"}],
+                                  "row_ids": ["r1"], "dropped": [], "records": [{}],
+                                  "evidence": {"r1": {}}, "records_count": 1,
+                                  "picked_chunks": 2})
+        disk = webapp._read_last_result()
+        check("第一批结果写盘", disk.get("result", {}).get("records_count") == 1
+              and disk.get("done_ids") == ["c1", "c2"])
+
+        # 第二批（继续抽取：skip_ids 非空）-> 接在上一批后面
+        webapp._save_last_result("j2", job(["c1", "c2"], ["c3"]),
+                                 {"headers": ["合金", "Si"], "rows": [{"合金": "A2"}],
+                                  "row_ids": ["r2"], "dropped": [], "records": [{}],
+                                  "evidence": {"r2": {}}, "records_count": 1,
+                                  "picked_chunks": 1})
+        disk = webapp._read_last_result()
+        check("续抽结果拼接（行数累加，不是覆盖）",
+              len(disk["result"]["rows"]) == 2
+              and disk["result"]["records_count"] == 2
+              and disk["result"]["picked_chunks"] == 3)
+        check("已抽块 id 累积去重", disk["done_ids"] == ["c1", "c2", "c3"])
+
+        # 全新开始 -> 整份覆盖
+        webapp._save_last_result("j3", job([], ["c9"]),
+                                 {"headers": ["合金"], "rows": [{"合金": "B1"}],
+                                  "row_ids": ["r9"], "dropped": [], "records": [{}],
+                                  "evidence": {}, "records_count": 1,
+                                  "picked_chunks": 1})
+        check("全新开始 -> 覆盖上一批",
+              webapp._read_last_result()["result"]["picked_chunks"] == 1)
+
+        # 模拟进程重启：内存清空，只有盘上这份
+        webapp._JOBS.clear()
+        webapp._RESTORED_DONE = False
+        got = webapp._running_job(now=1200.0)
+        check("重开后能找回上一批结果",
+              bool(got) and got.get("done") and got.get("result") is not None
+              and got.get("result_expired") is False)
+        # 捞回来之后就登记成普通任务：再刷新按 TTL 判断，不会每次都重读盘搬运
+        later = webapp._running_job(now=1200.0 + webapp._ADOPT_TTL_S + 60)
+        check("恢复只做一次（超时后不再搬运，只留已抽块 id）",
+              later.get("result") is None and later.get("result_expired") is True
+              and bool(later.get("done_ids")))
+        check("恢复后登记成已完成任务（之后可被新任务顶掉）",
+              any(j.get("done") and j.get("result") for j in webapp._JOBS.values()))
+
+        # 隔太久（超过 web.restore_ttl_s）就不还原：那时多半已经换了一批文献
+        webapp._JOBS.clear()
+        webapp._RESTORED_DONE = False
+        old = webapp._read_last_result()
+        old["finished_at"] = 1200.0 - webapp._RESTORE_TTL_S - 1
+        with open(p, "w", encoding="utf-8") as f:
+            json.dump(old, f, ensure_ascii=False)
+        check("超过还原时限 -> 不再把上周的结果摆出来",
+              webapp._running_job(now=1200.0) == {})
+
+        webapp._clear_last_result()
+        check("清盘后读回空", webapp._read_last_result() == {})
+    finally:
+        webapp._last_result_path = orig_path
+        webapp._JOBS.clear()
+        webapp._JOBS.update(orig_jobs)
+        webapp._RESTORED_DONE = orig_done
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
 def main() -> int:
     tmp = tempfile.mkdtemp(prefix="ragtest_")
     try:
@@ -1124,6 +1213,7 @@ def main() -> int:
         t_adopt_ttl()
         t_alignment()
         t_sanity_range()
+        t_result_persist()
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 

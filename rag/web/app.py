@@ -276,6 +276,10 @@ def extract_start(req: StartReq):
     for jid, j in list(_JOBS.items()):
         if j.get("done"):
             _JOBS.pop(jid, None)
+    # 不带 skip_ids = 全新开始：上一批（含盘上那份）一起作废，否则中途关掉页面
+    # 再打开，界面会把本该丢弃的上一批结果又显示出来。
+    if not req.skip_ids:
+        _clear_last_result()
     jid = uuid.uuid4().hex[:12]
     _JOBS[jid] = {"events": [], "cv": threading.Condition(), "done": False,
                   "result": None, "error": None, "started_at": time.time(),
@@ -309,6 +313,7 @@ def extract_start(req: StartReq):
                             should_stop=lambda: bool(_JOBS[jid].get("cancel")))
             payload = _extract_payload(res, req.excel_path)
             _JOBS[jid]["result"] = payload
+            _save_last_result(jid, _JOBS[jid], payload)
             # done 事件带上本批全部 chunk_id：即使中途某个订阅者漏了进度事件，
             # 光靠这一条也能把"已抽到哪"补回来（继续抽取的按钮靠它）。
             _publish(jid, {"type": "done", "result": payload,
@@ -331,6 +336,84 @@ def extract_start(req: StartReq):
 
     threading.Thread(target=work, daemon=True).start()
     return {"ok": True, "job_id": jid}
+
+
+# 上一批结果落盘的位置（data/output/ 已 gitignore，且只在本地，不外传）。
+# 为什么必须落盘：关掉页面后服务会自停，进程一没，内存里的结果就没了；
+# 而「已抽过哪些块」存在浏览器 localStorage 里，所以重开后按钮还在、跳过也照常，
+# 唯独右边的结果空了 —— 这个文件就是补上那一半。
+_LAST_RESULT_FILE = "last_extract.json"
+
+
+def _last_result_path() -> str:
+    return os.path.join(cfg.path("project.output_dir"), _LAST_RESULT_FILE)
+
+
+def _read_last_result() -> dict:
+    try:
+        with open(_last_result_path(), encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _merge_payload(prev: dict | None, nxt: dict) -> dict:
+    """把新一批结果接到上一批后面（前端 mergeResults 的服务端孪生）。
+
+    只在落盘续接时用：续抽的每一批单独看只有这一批的记录，不拼起来，
+    重开页面就只剩最后一批。表头在两批之间可能变（中途改过模板），
+    旧行按新表头对齐、缺的补空 —— 与前端保持同样的处理。
+    """
+    if not prev:
+        return nxt
+    headers = nxt.get("headers") or prev.get("headers") or []
+    old_rows = (prev.get("rows") if (prev.get("headers") or []) == headers
+                else [{h: r.get(h, "") for h in headers}
+                      for r in (prev.get("rows") or [])])
+    out = dict(nxt)
+    out["headers"] = headers
+    out["rows"] = list(old_rows) + list(nxt.get("rows") or [])
+    for k in ("row_ids", "dropped", "records"):
+        out[k] = list(prev.get(k) or []) + list(nxt.get(k) or [])
+    out["evidence"] = {**(prev.get("evidence") or {}), **(nxt.get("evidence") or {})}
+    for k in ("records_count", "picked_chunks"):
+        out[k] = (prev.get(k) or 0) + (nxt.get(k) or 0)
+    return out
+
+
+def _save_last_result(jid: str, job: dict, payload: dict) -> None:
+    """任务收工后把结果写盘（原子写，避免半截文件）。"""
+    try:
+        prev = _read_last_result()
+        # 续抽（带了 skip_ids）就接在上一批后面；全新开始则整份覆盖。
+        continuing = bool((job.get("req") or {}).get("skip_ids"))
+        prev_result = prev.get("result") if continuing else None
+        prev_ids = prev.get("done_ids") if continuing else []
+        data = {
+            "job_id": jid,
+            "started_at": job.get("started_at", 0.0),
+            "finished_at": job.get("finished_at") or time.time(),
+            "done_ids": list(dict.fromkeys(list(prev_ids or [])
+                                           + list(job.get("done_ids") or []))),
+            "req": dict(job.get("req") or {}),
+            "result": _merge_payload(prev_result, payload),
+        }
+        cfg.ensure_dir(cfg.path("project.output_dir"))
+        p = _last_result_path()
+        tmp = p + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False)
+        os.replace(tmp, p)
+    except Exception:                              # noqa: BLE001
+        pass
+
+
+def _clear_last_result() -> None:
+    """全新开始时把盘上的上一批清掉，免得中途关页面再开又冒出上一批的结果。"""
+    try:
+        os.remove(_last_result_path())
+    except OSError:
+        pass
 
 
 def _publish(jid: str, ev: dict) -> None:
@@ -381,14 +464,57 @@ def _iter_events(job: dict, start: int = 0):
 # 搬运并渲染上一批的完整结果——结果里带逐字段原文证据，几十块就有上百 KB~MB
 # 量级，每次刷新都传一遍、解析一遍、重绘一遍，页面就"变慢了"。
 _ADOPT_TTL_S = float(cfg.get("web.adopt_ttl_s", 600))
+# 关页面后隔多久重开还肯把上一批结果整份还原（默认 24 小时）。
+_RESTORE_TTL_S = float(cfg.get("web.restore_ttl_s", 86400))
+_RESTORED_DONE = False                             # 本次进程是否已捞过磁盘上的上一批
+
+
+def _restore_last_result(now: float | None = None) -> dict:
+    """进程重启后把磁盘上的上一批结果捞回内存，**每个进程只做一次**。
+
+    为什么需要它：关掉页面 → 服务自停 → 内存里的结果随进程一起没了，
+    而「已抽过哪些块」存在浏览器 localStorage 里，于是重开后按钮还在、
+    跳过也照常，唯独右边的结果面板空了。
+
+    为什么只做一次：结果里带逐字段的原文证据，几十块就有上百 KB~MB 量级。
+    捞回来之后登记成一条普通的"已完成任务"，后续刷新走和第 2 步一样的
+    TTL 判断，不会每次刷新都重新传一遍、重绘一遍。
+    """
+    global _RESTORED_DONE
+    if _RESTORED_DONE:
+        return {}
+    _RESTORED_DONE = True
+    disk = _read_last_result()
+    if not (disk and disk.get("result")):
+        return {}
+    finished = float(disk.get("finished_at") or 0.0)
+    # 隔了太久（默认超过 24 小时）就不还原了：那时多半已经换了一批文献，
+    # 把上周的结果摆出来反而误导。已抽到哪仍由浏览器 localStorage 兜住。
+    now = time.time() if now is None else now
+    if finished and (now - finished) > _RESTORE_TTL_S:
+        return {}
+    jid = disk.get("job_id") or "restored"
+    if jid not in _JOBS:                           # 真有同名任务在跑就不覆盖
+        _JOBS[jid] = {"events": [], "cv": threading.Condition(), "done": True,
+                      "result": disk.get("result"), "error": None,
+                      "started_at": disk.get("started_at", finished),
+                      "finished_at": finished,
+                      "last": {}, "done_ids": list(disk.get("done_ids") or []),
+                      "req": dict(disk.get("req") or {})}
+    return {"job_id": jid, "done": True,
+            "started_at": disk.get("started_at", finished),
+            "progress": {}, "done_ids": list(disk.get("done_ids") or []),
+            "result": disk.get("result"), "result_expired": False,
+            "req": dict(disk.get("req") or {})}
 
 
 def _running_job(now: float | None = None) -> dict:
     """找出一个「可接管」的抽取任务，供页面刷新后恢复现场。
 
-    两种都算可接管：
+    三种都算可接管：
       1. 正在跑的（done=False）——重连 SSE 接着看进度；
-      2. 已跑完且**刚结束不久**（≤ web.adopt_ttl_s，默认 10 分钟）——把结果还回去，
+      2. 本进程刚起来、磁盘上还留着上一批——把结果整份还回去；
+      3. 已跑完且**刚结束不久**（≤ web.adopt_ttl_s，默认 10 分钟）——把结果还回去，
          免得刷新一次就把几十分钟的成果丢了。超过这个窗口就只还原"已抽到哪"
          （done_ids），不再搬运结果，刷新因此保持轻快。
 
@@ -402,6 +528,9 @@ def _running_job(now: float | None = None) -> dict:
                     "progress": dict(j.get("last") or {}),
                     "done_ids": list(j.get("done_ids") or []),
                     "result": None, "req": dict(j.get("req") or {})}
+    restored = _restore_last_result(now)
+    if restored:
+        return restored
     for jid, j in list(_JOBS.items()):
         if not (j.get("done") and j.get("result")):
             continue
