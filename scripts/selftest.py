@@ -855,6 +855,7 @@ def t_chunk_plan(tmp: str):
               and r.get("req", {}).get("skip") == 5)
         _J["run1"]["done"] = True
         _J["run1"]["result"] = {"records_count": 7}
+        _J["run1"]["finished_at"] = _time.time()   # 结果只在时限内交还（web.adopt_ttl_s）
         r2 = _rj()
         check("接管已跑完未收取的结果",
               r2.get("done") is True and r2.get("result", {}).get("records_count") == 7)
@@ -946,6 +947,46 @@ def t_job_stream() -> None:
           [e.get("done") for e in early] == [1, 2, None])
 
 
+# ---------------------------------------------------------------- 17. 任务接管
+
+def t_adopt_ttl() -> None:
+    """已完成任务的结果只在时限内交还，否则刷新每次都要搬运+重绘上一批结果。"""
+    print("\n[17] 刷新接管的时效")
+    import threading
+
+    from rag.web import app as webapp
+
+    saved = dict(webapp._JOBS)
+    now = 1_000_000.0
+    try:
+        webapp._JOBS.clear()
+        webapp._JOBS["fresh"] = {"events": [], "cv": threading.Condition(),
+                                 "done": True, "result": {"records_count": 1},
+                                 "finished_at": now - 60, "started_at": now - 300,
+                                 "last": {}, "done_ids": ["c1"], "req": {}}
+        webapp._JOBS["old"] = {"events": [], "cv": threading.Condition(),
+                               "done": True, "result": {"records_count": 1},
+                               "finished_at": now - 7200, "started_at": now - 7300,
+                               "last": {}, "done_ids": ["c2"], "req": {}}
+        fresh = webapp._running_job(now)
+        check("刚结束的任务：结果照常交还",
+              fresh.get("done") and fresh.get("result") is not None)
+        check("超时任务：结果不再交还（刷新不再搬运旧结果）",
+              webapp._running_job(now + 700) is not None
+              and webapp._running_job(now + 700).get("result") is None)
+        check("超时任务仍还原「已抽到哪」",
+              webapp._running_job(now + 700).get("done_ids") in (["c1"], ["c2"]))
+        proc = webapp._JOBS  # 正在跑的任务不受时限影响
+        proc["live"] = {"events": [], "cv": threading.Condition(), "done": False,
+                        "result": None, "started_at": now, "last": {},
+                        "done_ids": [], "req": {}}
+        check("正在跑的任务永远可接管",
+              webapp._running_job(now + 99999).get("job_id") == "live")
+    finally:
+        webapp._JOBS.clear()
+        webapp._JOBS.update(saved)
+
+
 def main() -> int:
     tmp = tempfile.mkdtemp(prefix="ragtest_")
     try:
@@ -965,6 +1006,7 @@ def main() -> int:
         t_chunk_plan(tmp)
         t_launcher()
         t_job_stream()
+        t_adopt_ttl()
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 

@@ -100,6 +100,10 @@ const statLine = computed(() => {
 
 const llmOk = computed(() => llm.value?.ok === true)
 const llmName = computed(() => llm.value?.using || (llmOk.value ? '已连接' : '未连接'))
+// 连不上时把原因放到悬浮提示里：不然界面只有"未连接"三个字，无从查起。
+const llmTip = computed(() => llmOk.value
+  ? (llm.value?.base_url || '已连接')
+  : `未连接：${llm.value?.error || '未知原因（见 data/output/web.log 里 [llm] 开头的行）'}`)
 
 async function loadAll() {
   try {
@@ -318,6 +322,10 @@ async function adoptRunningJob() {
         ? { ...r.progress } : null
       return
     }
+    // 已跑完但结果已过期（超过 web.adopt_ttl_s，默认 10 分钟）：只还原
+    // "已抽到哪"，不去搬运上一批的完整结果 —— 否则每次刷新都要重新传一遍
+    // 带逐字段原文证据的结果、再重绘整张表，页面就变慢了。
+    if (r.done) return
     // 还在跑：重连 SSE，并把计时接到任务真正的起点
     running.value = true
     jobId.value = r.job_id
@@ -350,8 +358,13 @@ onMounted(async () => {
   loadAll()
   adoptRunningJob()
   try { await api.sessionHello(sessionId) } catch (e) { /* 老后端没有该接口 */ }
-  hbTimer = setInterval(() => {
-    api.sessionPing(sessionId).catch(() => {})
+  // 心跳每 15 秒回一次，顺便把模型连接状态带回来：
+  // 一次网络抖动造成的"未连接"会在 15 秒内自己恢复，不用刷新页面。
+  hbTimer = setInterval(async () => {
+    try {
+      const r = await api.sessionPing(sessionId)
+      if (r?.llm) llm.value = r.llm
+    } catch (e) { /* 心跳失败不影响使用，下次再试 */ }
   }, 15000)
   window.addEventListener('pagehide', sendBye)
   window.addEventListener('beforeunload', sendBye)
@@ -381,7 +394,7 @@ onBeforeUnmount(() => { if (hbTimer) clearInterval(hbTimer) })
         <span class="chip" :style="llmOk ? { color: 'var(--ok)', borderColor: 'var(--ok)' } : { color: 'var(--err)', borderColor: 'var(--err)' }">
           <i class="inline-block h-[6px] w-[6px] rounded-full"
              :style="{ background: llmOk ? 'var(--ok)' : 'var(--err)' }"></i>
-          <span class="mono max-w-[190px] truncate" :title="llmName">{{ llmName }}</span>
+          <span class="mono max-w-[190px] truncate" :title="llmTip">{{ llmName }}</span>
         </span>
         <button class="btn btn-ghost h-8 px-2" :title="theme === 'dark' ? '切换浅色' : '切换深色'" @click="toggleTheme">
           <svg v-if="theme === 'dark'" width="15" height="15" viewBox="0 0 24 24" fill="none"

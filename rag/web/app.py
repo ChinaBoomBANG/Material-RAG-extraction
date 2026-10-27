@@ -318,6 +318,7 @@ def extract_start(req: StartReq):
             job = _JOBS.get(jid)
             if job is not None:
                 job["done"] = True
+                job["finished_at"] = time.time()
                 with job["cv"]:
                     job["cv"].notify_all()
             # 用实测墙钟时间更新「每块耗时」经验值，供界面开跑前预估
@@ -346,6 +347,7 @@ def _publish_event(job: dict, ev: dict) -> None:
     job["events"].append(ev)
     if ev.get("type") in ("done", "error"):
         job["done"] = True
+        job.setdefault("finished_at", time.time())
     cv = job.get("cv")
     if cv is not None:
         with cv:
@@ -370,16 +372,25 @@ def _iter_events(job: dict, start: int = 0):
         yield ev                                  # None = 心跳
 
 
-def _running_job() -> dict:
+# 已完成任务保留多久还肯"交还"给刷新后的页面。
+# 目的是兜住手滑刷新（几十秒~几分钟内），而不是让每一次后续刷新都去重新
+# 搬运并渲染上一批的完整结果——结果里带逐字段原文证据，几十块就有上百 KB~MB
+# 量级，每次刷新都传一遍、解析一遍、重绘一遍，页面就"变慢了"。
+_ADOPT_TTL_S = float(cfg.get("web.adopt_ttl_s", 600))
+
+
+def _running_job(now: float | None = None) -> dict:
     """找出一个「可接管」的抽取任务，供页面刷新后恢复现场。
 
     两种都算可接管：
       1. 正在跑的（done=False）——重连 SSE 接着看进度；
-      2. 已跑完但结果还没被取走的（done=True 且有 result）——直接把结果还回去，
-         免得刷新一次就把几十分钟的成果丢了。
+      2. 已跑完且**刚结束不久**（≤ web.adopt_ttl_s，默认 10 分钟）——把结果还回去，
+         免得刷新一次就把几十分钟的成果丢了。超过这个窗口就只还原"已抽到哪"
+         （done_ids），不再搬运结果，刷新因此保持轻快。
 
-    纯函数（只依赖 _JOBS），便于自测。
+    now 可注入，便于自测（纯函数，不依赖真实时钟）。
     """
+    now = time.time() if now is None else now
     for jid, j in list(_JOBS.items()):
         if not j.get("done"):
             return {"job_id": jid, "done": False,
@@ -388,12 +399,17 @@ def _running_job() -> dict:
                     "done_ids": list(j.get("done_ids") or []),
                     "result": None, "req": dict(j.get("req") or {})}
     for jid, j in list(_JOBS.items()):
-        if j.get("done") and j.get("result"):
-            return {"job_id": jid, "done": True,
-                    "started_at": j.get("started_at", 0.0),
-                    "progress": dict(j.get("last") or {}),
-                    "done_ids": list(j.get("done_ids") or []),
-                    "result": j.get("result"), "req": dict(j.get("req") or {})}
+        if not (j.get("done") and j.get("result")):
+            continue
+        finished = j.get("finished_at") or j.get("started_at", 0.0)
+        fresh = (now - finished) <= _ADOPT_TTL_S
+        return {"job_id": jid, "done": True,
+                "started_at": j.get("started_at", 0.0),
+                "progress": dict(j.get("last") or {}),
+                "done_ids": list(j.get("done_ids") or []),
+                "result": j.get("result") if fresh else None,
+                "result_expired": not fresh,
+                "req": dict(j.get("req") or {})}
     return {}
 
 
@@ -472,7 +488,12 @@ def fill(req: FillReq):
 @app.get("/api/llm")
 def llm_health():
     try:
-        return {"ok": True, **pipe().llm.health()}
+        h = pipe().llm.health()
+        if not h.get("ok"):
+            # 静默启动（pythonw）没有控制台：连不上必须落到日志里，
+            # 否则界面只显示"未连接"，事后完全无从查起。
+            print(f"[llm] 健康检查失败：{h.get('error') or '未知原因'} @ {h.get('base_url')}")
+        return {"ok": True, **h}
     except Exception as e:
         return _err(e)
 
@@ -877,7 +898,16 @@ def session_ping(req: SessionReq):
     _CLIENTS[req.id] = time.time()
     _last_seen = time.time()
     _close_at = 0.0
-    return {"ok": True}
+    # 心跳顺带把模型连接状态带回去（health 有 60 秒缓存，几乎不花钱）：
+    # 顶部芯片每 15 秒自动校正一次，一次网络抖动造成的"未连接"会自己恢复，
+    # 不用刷新页面。
+    try:
+        h = pipe().llm.health(ttl=60)
+        llm = {"ok": bool(h.get("ok")), "using": h.get("using"),
+               "error": h.get("error")}
+    except Exception as e:                         # noqa: BLE001
+        llm = {"ok": False, "error": str(e)}
+    return {"ok": True, "llm": llm}
 
 
 @app.post("/api/session/bye")

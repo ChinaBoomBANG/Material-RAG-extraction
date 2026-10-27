@@ -120,3 +120,4 @@ web:
   shutdown_on_page_close: true
   shutdown_grace_s: 15       # 关页面后等 15 秒；刷新会在 hello 时取消，不会误杀
   idle_timeout_s: 180        # 页面被强杀/没发 bye 时的兜底：无心跳这么久就自停
+  adopt_ttl_s: 600           # 抽完后 10 分钟内刷新，结果会还回来；超时只还原"抽到哪"
