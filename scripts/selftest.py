@@ -11,6 +11,7 @@ import os
 import shutil
 import sys
 import tempfile
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -895,6 +896,56 @@ def t_launcher() -> None:
     check("start_web.vbs 用文件标记判定就绪", "web.ready" in raw.decode("ascii", "replace"))
 
 
+# ---------------------------------------------------------------- 16. 抽取事件订阅
+
+def t_job_stream() -> None:
+    """抽取进度事件必须广播给所有订阅者，且留下日志供后连者补发。
+
+    早先每个任务只有一条 Queue：刷新页面后新订阅会和旧连接抢同一条队列，
+    进度事件被分掉，chunk_ids 到不了新页面 → 「继续抽取」的按钮消失。
+    """
+    print("\n[16] 抽取事件的订阅与补发")
+    import threading
+
+    from rag.web import app as webapp
+
+    job = {"events": [], "cv": threading.Condition(), "done": False,
+           "result": None, "error": None, "started_at": 0.0,
+           "last": {}, "done_ids": [], "req": {}}
+
+    def consume(sink: list) -> None:
+        for ev in webapp._iter_events(job):
+            if ev is None:                  # 心跳
+                continue
+            sink.append(ev)
+            if ev.get("type") in ("done", "error"):
+                break
+
+    early: list = []
+    t1 = threading.Thread(target=consume, args=(early,), daemon=True)
+    t1.start()
+    time.sleep(0.05)
+    webapp._publish_event(job, {"type": "progress", "done": 1, "chunk_ids": ["c1"]})
+
+    late: list = []                         # 半路才连上的订阅者
+    t2 = threading.Thread(target=consume, args=(late,), daemon=True)
+    t2.start()
+    time.sleep(0.05)
+    webapp._publish_event(job, {"type": "progress", "done": 2, "chunk_ids": ["c2"]})
+    webapp._publish_event(job, {"type": "done", "chunk_ids": ["c1", "c2"]})
+    t1.join(5)
+    t2.join(5)
+
+    check("先连的订阅者收到全部 3 条事件", len(early) == 3, f"实得 {len(early)}")
+    check("后连的订阅者补齐历史事件（不再被抢走）",
+          [e.get("chunk_ids") for e in late] == [["c1"], ["c2"], ["c1", "c2"]],
+          str(late))
+    check("done 事件带本批完整 chunk_id（漏了进度也能补）",
+          early[-1].get("chunk_ids") == ["c1", "c2"])
+    check("事件不重复投送（日志+游标，一次一条）",
+          [e.get("done") for e in early] == [1, 2, None])
+
+
 def main() -> int:
     tmp = tempfile.mkdtemp(prefix="ragtest_")
     try:
@@ -913,6 +964,7 @@ def main() -> int:
         t_clean()
         t_chunk_plan(tmp)
         t_launcher()
+        t_job_stream()
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 

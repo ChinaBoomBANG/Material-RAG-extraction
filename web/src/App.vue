@@ -164,14 +164,14 @@ async function saveTemplate(name) {
 }
 
 function onProgress(ev) {
-  if (ev.type === 'progress') {
-    progress.value = ev
-    // 服务端每完成一批就上报该批的 chunk_id，累积成"已抽集合"
-    if (Array.isArray(ev.chunk_ids)) {
-      for (const id of ev.chunk_ids) doneIds.value.add(id)
-      doneIds.value = new Set(doneIds.value)      // 触发 Vue 响应式更新
-      saveDoneIds()
-    }
+  if (ev.type === 'progress') progress.value = ev
+  // 服务端每完成一批上报该批的 chunk_id；收尾的 done 事件再带一份本批完整清单。
+  // 两个来源都并入"已抽集合"：哪怕中途漏了进度事件（多标签页 / 刷新重连），
+  // 也能靠 done 那一份补回来 —— 否则「继续抽取」的按钮就会莫名消失。
+  if (Array.isArray(ev.chunk_ids)) {
+    for (const id of ev.chunk_ids) doneIds.value.add(id)
+    doneIds.value = new Set(doneIds.value)      // 触发 Vue 响应式更新
+    saveDoneIds()
   }
 }
 

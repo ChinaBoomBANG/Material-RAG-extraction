@@ -6,7 +6,6 @@ import csv
 import io
 import json
 import os
-import queue
 import re
 import threading
 import time
@@ -274,9 +273,9 @@ def extract_start(req: StartReq):
         if j.get("done"):
             _JOBS.pop(jid, None)
     jid = uuid.uuid4().hex[:12]
-    q: queue.Queue = queue.Queue()
-    _JOBS[jid] = {"q": q, "done": False, "result": None, "error": None,
-                  "started_at": time.time(), "last": {}, "done_ids": [],
+    _JOBS[jid] = {"events": [], "cv": threading.Condition(), "done": False,
+                  "result": None, "error": None, "started_at": time.time(),
+                  "last": {}, "done_ids": [],
                   # 参数快照：记录本批是怎么发起的
                   "req": {"skip_ids": req.skip_ids, "max_chunks": req.max_chunks,
                           "mode": req.mode, "doc_ids": req.doc_ids or []}}
@@ -296,7 +295,7 @@ def extract_start(req: StartReq):
                 ids = ev.get("chunk_ids")
                 if ids:
                     _JOBS[jid]["done_ids"].extend(ids)
-                q.put({"type": "progress", **ev})
+                _publish(jid, {"type": "progress", **ev})
 
             res = p.extract(excel_path=req.excel_path, doc_ids=req.doc_ids,
                             mode=req.mode, max_chunks=req.max_chunks,
@@ -306,19 +305,69 @@ def extract_start(req: StartReq):
                             should_stop=lambda: bool(_JOBS[jid].get("cancel")))
             payload = _extract_payload(res, req.excel_path)
             _JOBS[jid]["result"] = payload
-            q.put({"type": "done", "result": payload})
+            # done 事件带上本批全部 chunk_id：即使中途某个订阅者漏了进度事件，
+            # 光靠这一条也能把"已抽到哪"补回来（继续抽取的按钮靠它）。
+            _publish(jid, {"type": "done", "result": payload,
+                           "chunk_ids": list(_JOBS[jid]["done_ids"])})
         except Exception as e:                     # noqa: BLE001
             _JOBS[jid]["error"] = str(e)
-            q.put({"type": "error", "error": str(e),
-                   "trace": traceback.format_exc()[-1200:]})
+            _publish(jid, {"type": "error", "error": str(e),
+                           "trace": traceback.format_exc()[-1200:]})
         finally:
-            _JOBS[jid]["done"] = True
+            # 唤醒所有订阅者：任务已经收工，别让它们干等到心跳超时
+            job = _JOBS.get(jid)
+            if job is not None:
+                job["done"] = True
+                with job["cv"]:
+                    job["cv"].notify_all()
             # 用实测墙钟时间更新「每块耗时」经验值，供界面开跑前预估
             if last.get("done") and last.get("elapsed"):
                 _note_speed(last["elapsed"] / last["done"])
 
     threading.Thread(target=work, daemon=True).start()
     return {"ok": True, "job_id": jid}
+
+
+def _publish(jid: str, ev: dict) -> None:
+    job = _JOBS.get(jid)
+    if job is not None:
+        _publish_event(job, ev)
+
+
+def _publish_event(job: dict, ev: dict) -> None:
+    """把一条事件记进日志并唤醒所有订阅者。
+
+    早先每个任务只有一条 queue.Queue：事件是"取走就没"的。页面刷新后新页面订阅
+    同一任务时，进度事件会被旧连接抢走一部分 —— 新页面拿不到 chunk_ids，
+    「继续抽取」的按钮就没了。改成"事件日志 + 条件变量"后：每个订阅者各按自己的
+    游标读，互不干扰；后连的先补发历史事件，再多晚连上都不丢；多个标签页同时看
+    也不会互相抢。收尾事件统一在这里唤醒，避免订阅者干等到心跳超时。
+    """
+    job["events"].append(ev)
+    if ev.get("type") in ("done", "error"):
+        job["done"] = True
+    cv = job.get("cv")
+    if cv is not None:
+        with cv:
+            cv.notify_all()
+
+
+def _iter_events(job: dict, start: int = 0):
+    """按游标产出事件；None 表示一次心跳（让代理/浏览器别掐断长连接）。"""
+    cv = job["cv"]
+    i = start
+    while True:
+        with cv:
+            if i >= len(job["events"]) and not job["done"]:
+                cv.wait(timeout=15)
+            if i < len(job["events"]):
+                ev = job["events"][i]
+                i += 1
+            elif job["done"]:
+                return
+            else:
+                ev = None
+        yield ev                                  # None = 心跳
 
 
 def _running_job() -> dict:
@@ -374,19 +423,15 @@ def extract_stream(job_id: str):
         raise HTTPException(status_code=404, detail="任务不存在或已结束")
 
     def gen():
-        q: queue.Queue = job["q"]
-        while True:
-            try:
-                ev = q.get(timeout=15)
-            except queue.Empty:
-                if job["done"]:
-                    break
+        # 每个订阅者各按自己的游标读事件日志：先补发历史（刷新/新标签页连上来
+        # 不丢进度），再等新事件；多个订阅者互不干扰。
+        for ev in _iter_events(job):
+            if ev is None:
                 yield ": ping\n\n"          # 心跳，防止代理断开
                 continue
             yield "data: " + json.dumps(ev, ensure_ascii=False) + "\n\n"
             if ev.get("type") in ("done", "error"):
                 break
-        _JOBS.pop(job_id, None)
 
     return StreamingResponse(gen(), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache",
@@ -860,20 +905,30 @@ def session_shutdown():
 
 # ---------------------------------------------------------------- 前端静态资源
 
+_NO_STORE = {"Cache-Control": "no-store, must-revalidate"}
+
+
 @app.get("/")
 def index() -> FileResponse:
-    """优先返回 Vite 构建产物；没有构建过就退回旧版单页。"""
+    """优先返回 Vite 构建产物；没有构建过就退回旧版单页。
+
+    no-store：浏览器默认会对没有缓存头的 HTML 做"启发式缓存"，改过前端代码
+    重新构建后，用户看到的还是旧页面（表现就是"修好了但界面没变"）。
+    资产文件名带 hash，跟着 HTML 走即可，不需要额外处理。
+    """
     built = os.path.join(_DIST, "index.html")
     if os.path.isfile(built):
-        return FileResponse(built)
-    return FileResponse(os.path.join(_STATIC, "index.html"))
+        return FileResponse(built, headers=_NO_STORE)
+    return FileResponse(os.path.join(_STATIC, "index.html"), headers=_NO_STORE)
 
 
 @app.get("/api/ui")
 def ui_info():
-    """给界面/自检用：当前前端是构建版还是兜底版。"""
-    built = os.path.isfile(os.path.join(_DIST, "index.html"))
+    """给界面/自检用：当前前端是构建版还是兜底版、以及构建时间。"""
+    p = os.path.join(_DIST, "index.html")
+    built = os.path.isfile(p)
     return {"ok": True, "dist": _DIST, "built": built,
+            "built_at": (os.path.getmtime(p) if built else 0),
             "assets": os.path.isdir(os.path.join(_DIST, "assets"))}
 
 
