@@ -140,7 +140,7 @@ FIELD_DICT += [
     _f("microstructure.pfz_width", "PFZ 宽度", "microstructure", "nm", "number",
        ["PFZ", "无沉淀析出带", "precipitate free zone"]),
     _f("microstructure.second_phase", "第二相/夹杂", "microstructure", "", "text",
-       ["第二相", "second phase", "夹杂物", "inclusion", "AlFeSi", "Mg2Si"]),
+       ["第二相", "second phase", "夹杂物", "inclusion", "AlFeSi"]),
 
     # ---- 性能 ----
     _f("properties.YS", "屈服强度 Rp0.2", "properties", "MPa", "number",
@@ -151,9 +151,9 @@ FIELD_DICT += [
        ["延伸率", "伸长率", "elongation", "断后伸长率", "断裂延伸率",
         "El", "δ", "A50mm"]),
     _f("properties.hardness_HV", "硬度 HV", "properties", "HV", "number",
-       ["维氏硬度", "hardness", "HV", "Vickers", "显微硬度"]),
+       ["维氏硬度", "硬度HV", "hardness", "HV", "Vickers", "vickers hardness", "显微硬度"]),
     _f("properties.hardness_HB", "硬度 HB", "properties", "HB", "number",
-       ["布氏硬度", "HB", "Brinell"]),
+       ["布氏硬度", "硬度HB", "HB", "HBW", "Brinell", "brinell hardness"]),
     _f("properties.E", "弹性模量", "properties", "GPa", "number",
        ["弹性模量", "Young's modulus", "modulus", "E"]),
     _f("properties.density", "密度", "properties", "g/cm³", "number",
@@ -208,6 +208,26 @@ def _norm(s: str) -> str:
     return s
 
 
+# 表头尾部常见的单位写法（归一化后形如 elongation%、e(gpa)->egpa、ec(%iacs)->eciacs）
+_UNIT_TAILS = ("iacs", "mpa", "gpa", "hrc", "hrb", "hbw", "wt.%", "wt%", "at.%", "at%",
+               "ppm", "%", "°c", "℃", "μm", "um", "nm", "mm", "cm", "kg",
+               "min", "sec", "hv", "hb", "h", "s", "k")
+
+
+def _strip_unit_tail(n: str) -> str:
+    """剥掉表头末尾的单位，**剥完必须能对上别名**才算数。
+
+    这样 `uts(mpa)` 剥成 `uts` 就停（不会继续把 s 也剥掉变成 `ut`），
+    而 `e(gpa)` 剥成 `e`、`ec(%iacs)` 剥成 `ec` 都能命中。
+    """
+    for u in _UNIT_TAILS:                      # 长的在前，避免先剥掉半个单位
+        if len(n) > len(u) and n.endswith(u):
+            cand = n[: -len(u)]
+            if cand in _ALIAS_INDEX:
+                return cand
+    return n
+
+
 # 反向索引：归一化别名 -> key
 _ALIAS_INDEX: dict[str, str] = {}
 for _spec in FIELD_DICT:
@@ -241,15 +261,22 @@ def match_header(header: str) -> FieldSpec | None:
         if key in BY_KEY and re.fullmatch(
                 r"(?:含量|质量分数|wt|mas|at|ppm|%|\.)*", rest):
             return BY_KEY[key]
-    # 子串包含：表头更长时兜底。
-    # 元素符号（Si/Mg/Ti…）不参与子串兜底：实测 "Elongation (%)" 的
-    # "elonga-TI-on" 会被当成 Ti 列，数据就写到钛那一列去了。
+    # 去掉单位尾巴再试一次原名（elongation% -> elongation、e(gpa) -> e、ec(%iacs) -> ec）
+    bare = _strip_unit_tail(n)
+    if bare and bare != n and bare in _ALIAS_INDEX:
+        return BY_KEY[_ALIAS_INDEX[bare]]
+    # 子串包含：仅限**足够长的别名**兜底。
+    # 短别名（rm / ys / el / hv / ec / sn …）一旦参与子串匹配就会张冠李戴，
+    # 实测："Uniform elongation" 命中 rm（unifo-RM）→ 抗拉强度；
+    # "Analysis" 命中 ys → 屈服强度；"Brinell hardness" 命中 el → 延伸率。
+    best = ""
     for alias, key in _ALIAS_INDEX.items():
-        if len(alias) < 2 or alias not in n:
+        if len(alias) < 4 or alias not in n:
             continue
-        if key.startswith("composition.") and len(alias) <= 2:
-            continue
-        return BY_KEY[key]
+        if len(alias) > len(best):             # 最长匹配优先
+            best = alias
+    if best:
+        return BY_KEY[_ALIAS_INDEX[best]]
     return None
 
 

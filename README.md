@@ -59,7 +59,7 @@ RAG/
 ├── scripts/
 │   ├── fetch_embedding_model.py   下载 embedding 模型（hf-mirror 直链）
 │   ├── build_web.py               前端构建自动化（npm 探测 / 安装 / 构建 / 自检）
-│   └── selftest.py                不依赖 LLM 的全链路自测（253 项断言）
+│   └── selftest.py                不依赖 LLM 的全链路自测（286 项断言）
 └── data/
     ├── raw_pdfs/              放你的文献 PDF
     ├── index/                 索引产物（chunks / vectors / bm25 / docs）
@@ -438,7 +438,7 @@ extract:
 my_venv\Scripts\python.exe scripts/selftest.py
 ```
 
-共 **253 项断言**，覆盖：数值/区间/界限解析、单位归一、原文证据回链、字段-数值对齐、
+共 **286 项断言**，覆盖：数值/区间/界限解析、单位归一、原文证据回链、字段-数值对齐、
 成分常识校验（含「Si 被抽成 90 多必须拦下」）、表头映射、双栏阅读顺序、PDF 解析与表格识别、
 向量索引与混合检索、抽取证据链（含「编造字段必须被拦下」）、跨块记录合并、表格参考上下文、
 模板增删移与同名覆盖、Excel 备份/写入/逐格 diff、无表格时的终端渲染、启动脚本、

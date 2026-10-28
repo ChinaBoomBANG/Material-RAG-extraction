@@ -1802,6 +1802,66 @@ def t_join_rows() -> None:
           f"{len(out)} / {stats.get('rows_after')}")
 
 
+# ------------------------------- 27. 表头匹配的"张冠李戴"陷阱
+
+def t_header_traps() -> None:
+    """短别名参与子串匹配会把数据写到隔壁列：这里把踩过的坑全部钉住。"""
+    print("\n[27] 表头匹配陷阱（短别名 / 单位尾巴 / 别名冲突）")
+    import collections
+
+    from rag.extract import schema as S
+
+    # 1) 同一别名不许指向两个字段（否则结果取决于遍历顺序）
+    dup = collections.defaultdict(set)
+    for sp in S.BY_KEY.values():
+        for a in sp.aliases:
+            dup[S._norm(a)].add(sp.key)
+    bad = {a: sorted(k) for a, k in dup.items() if len(k) > 1}
+    check("同一别名不指向两个字段", not bad, f"{bad}")
+
+    # 2) 真实论文表头：宽松匹配必须落到正确字段，或者干脆不匹配
+    cases = {
+        "Elongation (%)": "properties.elongation",
+        "Uniform elongation": "properties.elongation",
+        "Total elongation": "properties.elongation",
+        "伸长率": "properties.elongation",
+        "El (%)": "properties.elongation",
+        "UTS (MPa)": "properties.UTS",
+        "YS (MPa)": "properties.YS",
+        "Rm (MPa)": "properties.UTS",
+        "E (GPa)": "properties.E",
+        "EC (%IACS)": "properties.conductivity",
+        "Brinell hardness": "properties.hardness_HB",
+        "Vickers hardness": "properties.hardness_HV",
+        "Hardness (HB)": "properties.hardness_HV",   # 见下方单独断言
+        "硬度 HB": "properties.hardness_HB",
+        "Si(wt.%)": "composition.Si",
+        "w(Si)": "composition.Si",
+        "Fe ppm": "composition.Fe",
+        "Ti": "composition.Ti",
+        # 下面是"宁可认不出，也不能认错"的
+        "Analysis (%)": None,
+        "Formability": None,
+        "Element content": None,
+        "HVOF coating": None,
+    }
+    cases.pop("Hardness (HB)")            # 它确实是 HB，用下面的正式断言
+    for h, want in cases.items():
+        got = getattr(S.match_header(h), "key", None)
+        check(f"表头 {h!r} -> {want}", got == want, f"实得 {got}")
+
+    check("Hardness (HB) -> HB（不被 hardness 抢成 HV）",
+          getattr(S.match_header("Hardness (HB)"), "key", None) == "properties.hardness_HB",
+          str(getattr(S.match_header("Hardness (HB)"), "key", None)))
+    check("Hardness (HV) -> HV",
+          getattr(S.match_header("Hardness (HV)"), "key", None) == "properties.hardness_HV")
+
+    # 3) 单位尾巴不许吃掉名字本身的字母：uts(mpa) 不能变成 ut
+    check("UTS (MPa) 剥单位后仍命中 UTS（不是 UT）",
+          S._strip_unit_tail(S._norm("UTS (MPa)")) == "uts",
+          S._strip_unit_tail(S._norm("UTS (MPa)")))
+
+
 def main() -> int:
     tmp = tempfile.mkdtemp(prefix="ragtest_")
     try:
@@ -1831,6 +1891,7 @@ def main() -> int:
         t_process_card()
         t_rounds()
         t_join_rows()
+        t_header_traps()
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
