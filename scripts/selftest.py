@@ -1233,6 +1233,9 @@ def t_excel_write_mapping() -> None:
                                 "data", "schemas", "al_no_balance.yaml"),
                    encoding="utf-8").read()
     tmpdir = tempfile.mkdtemp(prefix="ragtest_write_")
+    # 自测一律把输出目录指向临时目录：备份、报告都不许落到 data/output
+    wconf = copy.deepcopy(cfg.load())
+    wconf["project"]["output_dir"] = tmpdir
 
     def export(headers, name, make_file=True):
         p = os.path.join(tmpdir, f"{name}.xlsx")
@@ -1244,8 +1247,14 @@ def t_excel_write_mapping() -> None:
                 ws.append(headers)
             wb.save(p)
             wb.close()
-        res = export_data(ExportReq(records=[rec.to_dict()], schema_text=sd_yaml,
-                                    format="xlsx", excel_path=p, clean={}))
+        from rag.web import app as webapp
+        orig_load = webapp.cfg.load
+        webapp.cfg.load = lambda: wconf          # 别让备份落到生产的 data/output
+        try:
+            res = export_data(ExportReq(records=[rec.to_dict()], schema_text=sd_yaml,
+                                        format="xlsx", excel_path=p, clean={}))
+        finally:
+            webapp.cfg.load = orig_load
         body = res if isinstance(res, dict) else json.loads(res.body.decode())
         grid = [tuple(r) for r in openpyxl.load_workbook(p).active.iter_rows(values_only=True)]
         return body, grid
@@ -1283,8 +1292,14 @@ def t_excel_write_mapping() -> None:
     wb.close()
 
     def export_again():
-        res = export_data(ExportReq(records=[rec.to_dict()], schema_text=sd_yaml,
-                                    format="xlsx", excel_path=p, clean={}))
+        from rag.web import app as webapp
+        orig_load = webapp.cfg.load
+        webapp.cfg.load = lambda: wconf
+        try:
+            res = export_data(ExportReq(records=[rec.to_dict()], schema_text=sd_yaml,
+                                        format="xlsx", excel_path=p, clean={}))
+        finally:
+            webapp.cfg.load = orig_load
         body = res if isinstance(res, dict) else json.loads(res.body.decode())
         grid = [tuple(r) for r in openpyxl.load_workbook(p).active.iter_rows(values_only=True)]
         return body, grid
@@ -1298,6 +1313,69 @@ def t_excel_write_mapping() -> None:
           int(b1.get("duplicate_of_existing") or 0) == 0
           and int(b2.get("duplicate_of_existing") or 0) == 1
           and len(g2) == 4, f"{b1.get('duplicate_of_existing')}/{b2.get('duplicate_of_existing')}")
+
+    # ---- upsert：同一合金要回填到已有行的空格里，不是再堆一行 ----
+    from rag.writeback.excel import ExcelTarget
+    p2 = os.path.join(tmpdir, "upsert.xlsx")
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "data"
+    ws.append(["合金牌号", "Al", "Si", "Mg", "固溶温度", "固溶时间", "时效温度", "时效时间"])
+    ws.append(["6013", "Bal.", 0.6, 0.85, None, None, None, None])
+    ws.append(["6082", "Bal.", 0.7, 0.6, None, None, None, None])
+    wb.save(p2)
+    wb.close()
+
+    tg = ExcelTarget(p2, wconf)
+    r1 = tg.write([{"合金牌号": "6013", "固溶温度": 550, "固溶时间": 0.5,
+                    "时效温度": 175, "时效时间": 8}], dry_run=False)
+    check("同牌号新数据回填到已有行（不新增行、不覆盖成分）",
+          r1["updated_rows"] == 1 and r1["appended_rows"] == 0
+          and r1["written_cells"] == 4 and r1["unexpected_count"] == 0,
+          f"updated={r1['updated_rows']} appended={r1['appended_rows']} "
+          f"cells={r1['written_cells']} unexpected={r1['unexpected_count']}")
+
+    r2 = tg.write([{"合金牌号": "6013", "固溶温度": 560}], dry_run=False)
+    check("同牌号但值冲突 -> 另起一行（绝不覆盖原值）",
+          r2["appended_rows"] == 1 and r2["updated_rows"] == 0, f"{r2['appended_rows']}")
+
+    r3 = tg.write([{"合金牌号": "6061", "Si": 0.65}, {"合金牌号": "6061", "时效温度": 180}],
+                  dry_run=False)
+    check("同一批内部先按牌号合并（成分与工艺不再各占一行）",
+          r3["appended_rows"] == 1 and r3["written_cells"] == 3,
+          f"appended={r3['appended_rows']} cells={r3['written_cells']}")
+
+    # 同一牌号在表里有多行、且没有文献列 -> 不猜，另起一行并如实报告
+    p3 = os.path.join(tmpdir, "ambig.xlsx")
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "data"
+    ws.append(["合金牌号", "Si", "固溶温度"])
+    ws.append(["6061", 0.6, None])
+    ws.append(["6061", 0.8, None])
+    wb.save(p3)
+    wb.close()
+    tg3 = ExcelTarget(p3, wconf)
+    r4 = tg3.write([{"合金牌号": "6061", "固溶温度": 550}], dry_run=False)
+    check("同牌号多行且无文献列 -> 不猜，另起一行（ambiguous 可查）",
+          r4["ambiguous_keys"] == 1 and r4["appended_rows"] == 1,
+          f"ambiguous={r4['ambiguous_keys']} appended={r4['appended_rows']}")
+
+    # 表里有文献列时，键变成「牌号+文献」，同牌号不同文献互不干扰
+    p4 = os.path.join(tmpdir, "withdoc.xlsx")
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "data"
+    ws.append(["合金牌号", "文献", "Si", "固溶温度"])
+    ws.append(["6061", "p1.pdf", 0.6, None])
+    ws.append(["6061", "p2.pdf", 0.8, None])
+    wb.save(p4)
+    wb.close()
+    tg4 = ExcelTarget(p4, wconf)
+    r5 = tg4.write([{"合金牌号": "6061", "文献": "p2.pdf", "固溶温度": 550}], dry_run=False)
+    check("有文献列时按「牌号+文献」回填，不串到别的文献那行",
+          r5["updated_rows"] == 1 and r5["appended_rows"] == 0
+          and r5["ambiguous_keys"] == 0, f"{r5['updated_rows']}/{r5['appended_rows']}")
 
     # 纯函数层：模板列 -> 目标列名
     from rag.extract.schema import BY_KEY
@@ -1420,6 +1498,131 @@ def t_job_visibility() -> None:
         llmc.opener_for, llmc.time.sleep = orig_opener, orig_sleep
 
 
+# ------------------------------- 23. 工艺字段的量纲校验（时效温度=1 这类错误）
+
+def t_quantity_guard() -> None:
+    """成分校验管不到工艺字段：时效温度被填成 1（其实是 1 h），引文逐字命中。"""
+    print("\n[23] 工艺/性能字段的量纲与范围校验")
+    from rag.extract.normalize import quantity_issue, quantity_kind
+
+    check("时效温度 -> aging_temp", quantity_kind("时效温度") == "aging_temp")
+    check("固溶时间 -> solution_time", quantity_kind("固溶时间") == "solution_time")
+    check("550 °C 合法", quantity_issue("solution_temp", 550, "at 550 °C") == "")
+    check("时效温度=1 判越界（1 是小时数，不是温度）",
+          "物理范围" in quantity_issue("aging_temp", 1, "aged for 1 h"))
+    check("固溶温度=6 判越界", "物理范围" in quantity_issue("solution_temp", 6, "6 h"))
+    check("引文单位与字段量纲冲突 -> 报错（175 h 不是温度）",
+          "单位" in quantity_issue("aging_temp", 175, "aged at 175 h"))
+    check("没有单位时不误报（原文常不写单位）",
+          quantity_issue("aging_temp", 175, "aged at 175") == "")
+
+    # 端到端：假模型给出 时效温度=1（引文 "1 h"），该字段必须被删、成分保留
+    text = "The alloy was aged for 1 h and the Si content was 0.62 wt.%."
+    chunk = Chunk.make("doc9", "q.pdf", 1, "text", text)
+
+    class QLLM:
+        def chat_json(self, user, system="", retry_hint="", response_format=None):
+            return {"records": [{
+                "row_label": "6013",
+                "fields": {
+                    "alloy": {"raw": "6013", "quote": "The alloy was aged for 1 h"},
+                    "composition.Si": {"raw": "0.62", "quote": "Si content was 0.62 wt.%"},
+                    "process.aging_temp": {"raw": "1", "quote": "aged for 1 h"},
+                },
+                "note": ""}]}
+
+    specs = build_schema_from_headers(["合金牌号", "Si", "时效温度"])["specs"]
+    recs = Extractor(QLLM(), cfg.load()).extract([chunk], specs)
+    check("量纲不符的字段被删、同行的成分保留",
+          len(recs) == 1 and "aging_temp" not in recs[0].process
+          and recs[0].composition.get("Si") is not None,
+          f"{[r.process for r in recs]}")
+    check("删除原因写进 warnings（可见，不静默）",
+          any("量纲校验" in w for w in recs[0].warnings), f"{recs[0].warnings}")
+
+
+# ------------------------------- 24. 文档级工艺配方卡（工艺只在实验段落里说一次）
+
+def t_process_card() -> None:
+    """块级抽取拿不到跨块信息 -> 工艺列几乎全空。这里验证卡片能补上、且不瞎补。"""
+    print("\n[24] 文档级工艺配方卡")
+    from rag.extract.process_card import (apply_card, apply_process_cards,
+                                          pick_route, role_map)
+    from rag.models import FieldValue, MaterialRecord
+
+    specs = build_schema_from_headers(
+        ["合金牌号", "Si", "固溶温度", "固溶时间", "时效温度", "时效时间"])["specs"]
+    roles = role_map(specs)
+    check("目标表的工艺列被识别成角色",
+          bool(roles.get("solution_temp") and roles.get("aging_temp")
+               and roles.get("aging_time")), f"{roles}")
+
+    doc_text = ("The alloys were solution treated at 550 C for 1 h, water quenched, "
+                "then aged at 175 C for 8 h.")
+    def fld(raw, quote):
+        return {"raw": raw, "quote": quote, "verified": True}
+
+    routes = [{"label": "", "doc": "p.pdf", "doc_id": "d1", "fields": {
+        "solution_temp": fld("550", "solution treated at 550 C"),
+        "solution_time": fld("1", "for 1 h"),
+        "quench": fld("water quenched", "water quenched"),
+        "aging_temp": fld("175", "aged at 175 C"),
+        "aging_time": fld("8", "for 8 h"),
+    }}]
+
+    r1 = MaterialRecord(alloy="6061", source_doc="p.pdf")
+    r1.composition["Si"] = FieldValue(value=0.62, unit="wt.%")
+    stats = apply_card([r1], routes, roles)
+    check("全篇只有一条工艺 -> 按 paper-level 补进记录",
+          r1.process.get("solution_temp") is not None and stats["filled"] >= 4,
+          f"filled={stats['filled']} process={list(r1.process)}")
+    check("补进来的值带出处（warnings 可查）",
+          any("工艺补全" in w for w in r1.warnings), f"{r1.warnings[:2]}")
+
+    r1.process["aging_temp"] = FieldValue(value=190, unit="°C")
+    apply_card([r1], routes, roles)
+    check("记录里已有的工艺值不被卡片覆盖", r1.process["aging_temp"].value == 190)
+
+    two = [dict(routes[0], label="6061"),
+           {"label": "7075", "doc": "p.pdf", "doc_id": "d1",
+            "fields": {"aging_temp": fld("120", "aged at 120 C")}}]
+    r2 = MaterialRecord(alloy="2024", source_doc="p.pdf")
+    apply_card([r2], two, roles)
+    check("多条路线、牌号对不上 -> 一律留空", not r2.process, f"{list(r2.process)}")
+
+    r3 = MaterialRecord(alloy="7075", source_doc="p.pdf")
+    apply_card([r3], two, roles)
+    check("牌号对得上 -> 用该牌号那条路线",
+          r3.process.get("aging_temp") is not None
+          and str(r3.process["aging_temp"].value) == "120",
+          f"{r3.process.get('aging_temp')}")
+
+    r4 = MaterialRecord(alloy="6061", source_doc="p.pdf")
+    apply_card([r4], [{"label": "", "fields": {"aging_temp":
+                 {"raw": "175", "quote": "编造的引文", "verified": False}}}], roles)
+    check("引文没核验的字段不被使用", not r4.process, f"{list(r4.process)}")
+
+    calls = {"n": 0}
+
+    class CardLLM:
+        def chat_json(self, user, system="", retry_hint="", response_format=None):
+            calls["n"] += 1
+            return {"routes": [{"label": "", "solution_temp":
+                                {"raw": "550", "quote": "solution treated at 550 C"}}]}
+
+    class Store2:
+        chunks = [Chunk.make("d1", "p.pdf", 1, "text", doc_text)]
+
+    conf = copy.deepcopy(cfg.load())
+    conf["project"]["index_dir"] = tempfile.mkdtemp(prefix="card_idx_")
+    apply_process_cards(CardLLM(), Store2(), [MaterialRecord(alloy="6061", source_doc="p.pdf")],
+                        specs, conf)
+    apply_process_cards(CardLLM(), Store2(), [MaterialRecord(alloy="6061", source_doc="p.pdf")],
+                        specs, conf)
+    check("建卡结果按（文献, 模型）缓存，第二次不再请求模型",
+          calls["n"] == 1, f"调用 {calls['n']} 次")
+
+
 def main() -> int:
     tmp = tempfile.mkdtemp(prefix="ragtest_")
     try:
@@ -1445,6 +1648,8 @@ def main() -> int:
         t_result_persist()
         t_excel_write_mapping()
         t_job_visibility()
+        t_quantity_guard()
+        t_process_card()
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 

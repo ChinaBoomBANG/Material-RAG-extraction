@@ -116,6 +116,20 @@ extract:
       Ti: 0.4
       Zr: 0.5
       Ni: 4
+  # 工艺/性能字段的物理范围：越界即视为「值落错列」，删掉该字段不写入。
+  # 实测坑：时效温度被填成 1、固溶温度被填成 6（其实是小时数），
+  # 成分校验永远拦不住，因为它们的单位不是 wt.%。
+  quantity_ranges:
+    solution_temp: [300, 660]     # 固溶温度 °C
+    aging_temp:    [20, 320]      # 时效温度 °C
+    solution_time: [0.05, 300]    # 固溶时间 h
+    aging_time:    [0.05, 800]    # 时效时间 h
+    temperature:   [-80, 1400]    # 其他温度
+    time:          [0.001, 5000]  # 其他时间
+    strength:      [0, 3000]      # 强度 MPa
+    hardness:      [0, 2000]      # 硬度 HV/HB
+    elongation:    [0, 100]       # 延伸率 %
+
   sec_per_chunk: 60               # 首次预估用（无实测值时）。跑过一次后以实测墙钟为准。
   max_records_per_chunk: 20       # 单块最多输出多少条记录。数据集范围表动辄几十行，
                                   # 不设上限时模型会一直生成直到撞 max_tokens，单块可达数分钟。
@@ -127,6 +141,13 @@ extract:
   table_context:
     enabled: true
     max_chars: 400                # 每张表附带的同页正文上限；设 0 等同关闭
+  # 文档级工艺补全（关键：工艺参数在论文里通常只说一次，块级抽取看不到）
+  # 每篇文献额外跑一次调用，把工艺路线抄成结构化卡片，再补进缺工艺的记录。
+  # 只填空、不覆盖；牌号对不上且文献有多条路线时留空，绝不猜。
+  process_card:
+    enabled: true
+    max_chars: 12000              # 送去建卡的正文上限（优先含固溶/时效/淬火的段落）
+    cache: true                   # 按 (文献, 模型) 缓存到 data/index/process_cards.json
   # 结构化输出（云端 API 支持时）会减少"输出带解释文字"导致的 JSON 解析失败；
   # 本地服务不支持会自动去掉该参数重试，不影响兼容性。
   json_object_mode: true
@@ -136,6 +157,10 @@ writeback:
   backup: true                    # 写前 shutil.copy2 备份（强制开启）
   dry_run_default: true           # 默认只产出预览与 diff，不落盘
   allow_create_missing_columns: true
+  upsert: true                    # 按牌号回填已有行的空格；非空单元格不改。
+                                  # false = 旧行为：一律追加到末尾（会出现同一合金多行）
+  min_fill_rate: 0               # 导出前的填充率下限：0=只报告不拦。>0 时低于该比例直接拒绝写入
+  key_columns: []                # 回填时的主键列；留空=自动（牌号列 + 表里若有「文献/来源」列）。单靠牌号会在同牌号多行时判不出来
   style:
     header_bold: true
     freeze_header: true

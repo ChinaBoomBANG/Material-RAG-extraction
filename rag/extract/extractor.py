@@ -19,8 +19,8 @@ from ..llm.client import LLMClient
 from ..models import Chunk, Evidence, FieldValue, MaterialRecord
 from .align import alignment_issue
 from .normalize import (DEFAULT_MAX_WT, ELEMENT_MAX_WT, canonical_unit,
-                        composition_sum, parse_value, sanity_issue,
-                        verify_quote, verify_raw)
+                        composition_sum, parse_value, quantity_issue,
+                        quantity_kind, sanity_issue, verify_quote, verify_raw)
 from .schema import ALLOY_SPEC, BY_KEY, FieldSpec, schema_brief
 
 # 行标签黑名单：这些行是试验网格 / 统计值 / 参数名，不对应任何具体材料，
@@ -295,6 +295,13 @@ class Extractor:
             except (TypeError, ValueError):
                 pass
         default_max = float(san.get("default_max_wt", DEFAULT_MAX_WT) or DEFAULT_MAX_WT)
+        # 工艺/性能字段的物理范围（温度/时间最易被搬错列，例如时效温度=1）
+        q_ranges: dict[str, tuple[float, float]] = {}
+        for k, v in (self.conf["extract"].get("quantity_ranges") or {}).items():
+            try:
+                q_ranges[str(k)] = (float(v[0]), float(v[1]))
+            except (TypeError, ValueError, IndexError, KeyError):
+                continue
 
         for i, rr in enumerate(raw_records):
             if not isinstance(rr, dict):
@@ -306,6 +313,7 @@ class Extractor:
                                  source_page=chunks[0].page,
                                  row_label=row_label)
             violations = 0          # 本条记录里越界的成分字段数（用于整条丢弃）
+            qviol = 0               # 被量纲校验删掉的工艺/性能字段数
             if pred_only:
                 rec.warnings.append("该表表题为预测性能，性能值记入 *_pred 字段（非实测）")
             for key, val in fields.items():
@@ -407,6 +415,18 @@ class Extractor:
                         continue
                     rec.warnings.append(f"异常：{issue}（已保留，请人工复核）")
 
+                # ---- 工艺/性能字段的量纲与范围校验 ----
+                # 成分校验管不到这里：时效温度=1、固溶温度=6 这类值单位不是 wt.%，
+                # 引文又逐字命中，旧实现会原样写进表格。实测你那张表里有 9 处。
+                qk = quantity_kind(spec.label if spec else "", key) if san_on else ""
+                if qk and parsed["kind"] == "single" and isinstance(sv, (int, float)):
+                    qissue = quantity_issue(qk, sv, quote, q_ranges)
+                    if qissue:
+                        rec.warnings.append(
+                            f"量纲校验：字段 {key} {qissue}（已删除该字段，未写入记录）")
+                        qviol += 1
+                        continue
+
                 target = self._bucket(rec, key)
                 target[key.split(".", 1)[1] if "." in key else key] = fv
 
@@ -460,13 +480,14 @@ class Extractor:
                 rec.warnings.append(f"条件说明：{note}")
             if any(rec.composition) or any(rec.process) or any(rec.microstructure) or any(rec.properties):
                 out.append(rec)
-            elif violations:
+            elif violations or qviol:
                 # 字段被越界/未识别规则删光后，这条记录会静默消失。
                 # 必须落到 dropped 里说明原因，否则"明明抽到了却一条都没有"无从查起。
                 self.dropped.append({
                     "doc": chunks[0].doc_name, "page": chunks[0].page,
                     "row_label": row_label, "note": note[:40],
-                    "reason": f"{violations} 个字段因越界被删除，该行已无有效数据（整条丢弃）",
+                    "reason": (f"{violations} 个字段因越界被删除、{qviol} 个字段因量纲不符"
+                               f"被删除，该行已无有效数据（整条丢弃）"),
                 })
         return out
 
@@ -494,13 +515,19 @@ def _fingerprint(rec: MaterialRecord) -> str:
 
 
 def _identity(rec: MaterialRecord) -> tuple[str, str]:
-    """同一样品的身份键：文献 + 合金牌号。
+    """同一样品的身份键：文献 + 牌号（没有牌号时退到行标签）。
 
     为什么不用「所有字段值」做键（旧实现）：同一样品的成分往往在一张表、
     性能在另一张表，两条记录的字段集合不同 → 指纹不同 → 永远合不上，
     结果是一条记录只有成分、另一条只有性能。改成按身份键合并才能拼齐。
+
+    为什么牌号为空时用 row_label：实验段落抽出来的工艺记录常常没有牌号，
+    但行标签（A1/D3/T6）在同一篇文献内是稳定的。旧实现把它们挤进 (doc, "")，
+    只要有冲突就各自成行，于是同一批样品被拆成好几行——这正是用户表格里
+    「同一合金散落多行、工艺列几乎全空」的来源之一。
     """
-    return (rec.source_doc or "", (rec.alloy or "").strip())
+    alloy = (rec.alloy or "").strip() or (rec.row_label or "").strip()
+    return (rec.source_doc or "", alloy)
 
 
 def _merge_into(dst: MaterialRecord, src: MaterialRecord) -> bool:

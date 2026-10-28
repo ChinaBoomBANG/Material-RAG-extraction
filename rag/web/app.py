@@ -208,6 +208,7 @@ def _extract_payload(res: dict, excel_path: str | None) -> dict:
                    "hash": (sdef.schema_hash if sdef else "")},
         "schema_groups": ([g.to_dict() for g in sdef.groups] if sdef else []),
         "dropped": res.get("dropped", []),
+        "process_card": res.get("process_card"),
         "headers": headers,
         "rows": rows,
         "row_ids": [r.record_id for r in recs],
@@ -880,6 +881,24 @@ def _count_duplicate_rows(path: str, sheet: str, headers: list[str],
         return None
 
 
+def _fill_coverage(headers: list[str], rows: list[dict]) -> dict:
+    """这批数据在目标表各列上的填充率——"写进去了"不等于"抽到了"。
+
+    只统计目标表里真正有值的列；分母是这批行数。返回逐列比例与整体比例，
+    界面用它告诉用户「工艺列只有 5%」这类事实，而不是一句"已写入 N 行"。
+    """
+    cols = [h for h in headers if h and h.strip()]
+    n = len(rows) or 1
+    per: dict[str, float] = {}
+    for h in cols:
+        got = sum(1 for r in rows
+                  if r.get(h) is not None and str(r.get(h)).strip() != "")
+        per[h] = round(got / n, 4)
+    overall = round(sum(per.values()) / len(per), 4) if per else 0.0
+    return {"rows": len(rows), "overall": overall, "columns": per,
+            "low": [h for h, v in per.items() if v < 0.5]}
+
+
 def _map_rows_to_headers(rows: list[dict], specs: dict,
                          headers: list[str]) -> tuple[list[dict], list[str], list[str]]:
     """把「模板列名」行改写为「目标表真实列名」行。
@@ -1064,6 +1083,20 @@ def export_data(req: ExportReq):
         # 有多少行与表里已有行完全相同（仍然写入，绝不擅自替用户删）。
         dup_of_existing = _count_duplicate_rows(target, tgt.sheet,
                                                 target_headers, mapped_rows)
+
+        # 填充率闸门：先算再写。"写进去了"不等于"抽到了"——工艺列只有 5% 时
+        # 界面若只说"已写入 N 行"，用户会以为抽取成功，其实大半是空的。
+        coverage = _fill_coverage(target_headers, mapped_rows)
+        min_rate = float((cfg.load().get("writeback") or {}).get("min_fill_rate", 0) or 0)
+        if min_rate > 0 and coverage["overall"] < min_rate:
+            return JSONResponse(status_code=400, content={
+                "ok": False,
+                "error": f"这批数据的整体填充率只有 {coverage['overall']*100:.1f}%，"
+                         f"低于设定下限 {min_rate*100:.0f}%，已放弃写入（没有改动你的表格）",
+                "coverage": coverage, "target": target,
+                "hint": "把 writeback.min_fill_rate 调低或设为 0 可强制写入；"
+                        "填充率低通常是抽取模式只选了表格块、或该文献没报告这些参数。"})
+
         wres = tgt.write(mapped_rows, dry_run=False)
         written = int(wres.get("written_cells") or 0)
         return {"ok": written > 0, "format": "xlsx", "write": wres,
@@ -1073,6 +1106,7 @@ def export_data(req: ExportReq):
                 "written_cells": written,
                 "column_mapping": mapping, "skipped_columns": skipped,
                 "duplicate_of_existing": dup_of_existing,
+                "coverage": coverage,
                 "balance_added": balance_added,
                 "clean_report": report, "schema": sdef.to_dict()}
     except Exception as e:

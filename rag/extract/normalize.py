@@ -263,3 +263,116 @@ def canonical_unit(unit: str) -> str:
         return ""
     key = unit.strip().lower().replace(" ", "")
     return UNIT_ALIASES.get(key, unit.strip())
+
+
+# ------------------------------------------------ 工艺/性能字段的量纲与范围校验
+
+# 默认物理范围（可按合金体系在 config 的 extract.quantity_ranges 覆盖）。
+# 依据：铝合金固溶 450~580 °C、时效 100~250 °C 是常规区间；这里放宽到
+# 边界之外仍能容下异常工艺（如 300 °C 低温固溶、600 °C 高温时效）。
+QUANTITY_RANGES: dict[str, tuple[float, float]] = {
+    "solution_temp": (300.0, 660.0),   # 固溶温度 °C
+    "aging_temp": (20.0, 320.0),       # 时效温度 °C
+    "solution_time": (0.05, 300.0),    # 固溶时间 h
+    "aging_time": (0.05, 800.0),       # 时效时间 h
+    "temperature": (-80.0, 1400.0),    # 其他温度
+    "time": (0.001, 5000.0),           # 其他时间
+    "strength": (0.0, 3000.0),         # 强度 MPa
+    "hardness": (0.0, 2000.0),         # 硬度 HV/HB
+    "elongation": (0.0, 100.0),        # 延伸率 %
+}
+
+# 量纲词 -> 单位模式（用词边界匹配，避免 "kJ/mol" 里的 k、"hours" 之外的 h 误命中）
+_UNIT_PATTERNS = {
+    "temp": r"°\s*c|℃|\bdegc\b|\bkelvin\b",
+    "time": (r"\b(?:h|hr|hrs|hour|hours|min|mins|minute|minutes|"
+             r"s|sec|secs|second|seconds|day|days)\b|小时|分钟|秒|天"),
+}
+
+
+def quantity_kind(label: str, key: str = "") -> str:
+    """按字段标签判定它是什么物理量（决定用哪条范围规则）。
+
+    工艺字段是"最容易被搬错列"的地方——时效温度=1、固溶温度=6 这类值
+    在成分校验里永远不会被拦下，因为它们的单位不是 wt.%。
+    """
+    s = f"{label or ''} {key or ''}".lower()
+    has_sol = ("固溶" in s) or ("solution" in s) or ("solubil" in s)
+    has_age = ("时效" in s) or ("aging" in s) or ("ageing" in s) or ("age " in s)
+    if "温度" in s or "temp" in s:
+        if has_sol:
+            return "solution_temp"
+        if has_age:
+            return "aging_temp"
+        return "temperature"
+    if "时间" in s or "time" in s or "hour" in s or "duration" in s:
+        if has_sol:
+            return "solution_time"
+        if has_age:
+            return "aging_time"
+        return "time"
+    if "强度" in s or "strength" in s or "uts" in s or "ys" in s:
+        return "strength"
+    if "硬度" in s or "hardness" in s or s.strip().endswith("hv") or "hb" in s:
+        return "hardness"
+    if "延伸" in s or "伸长" in s or "elongation" in s or s.strip() == "el":
+        return "elongation"
+    return ""
+
+
+def quantity_issue(kind: str, value, quote: str = "",
+                   ranges: dict[str, tuple[float, float]] | None = None,
+                   ) -> str:
+    """对工艺/性能数值做量纲与范围校验，返回问题说明；没问题返回空串。
+
+    两类硬错误（都说明"这个数不属于这个字段"）：
+      1) 数值超出该字段的物理范围（时效温度=1、固溶温度=6）；
+      2) 引文里紧跟该数字的单位与该字段的量纲冲突（"1 h" 被当成时效温度）。
+    只在有**阳性证据**时才报，单位缺失不报错——原文常常不写单位。
+    """
+    if not kind or value is None:
+        return ""
+    try:
+        v = float(str(value).strip())
+    except (TypeError, ValueError):
+        return ""
+    table = dict(QUANTITY_RANGES)
+    table.update(ranges or {})
+    lo, hi = table.get(kind) or table.get(kind.split("_")[-1], (-1e18, 1e18))
+    if not (lo <= v <= hi):
+        return (f"{v:g} 超出该字段的物理范围 {lo:g}~{hi:g}"
+                f"（疑似把别的量纲/别的列写进了这个字段）")
+    want = _modal_kind(kind)
+    got = _unit_near(quote, v)
+    if want and got and got != want:
+        return (f"引文里 {v:g} 后面跟的是「{got}」单位，但这个字段是「{want}」"
+                f"（疑似时间/温度落错列）")
+    return ""
+
+
+def _modal_kind(kind: str) -> str:
+    if kind.endswith("temp") or kind == "temperature":
+        return "temp"
+    if kind.endswith("time") or kind == "time":
+        return "time"
+    return ""
+
+
+def _unit_near(quote: str, v: float) -> str:
+    """在引文里找到这个数字，看它后面紧邻（8 个字符内）是什么单位。
+
+    用词边界匹配：否则 "kJ/mol" 里的小写 k 会被当成开尔文，
+    "strength" 里的 s 会被当成秒。
+    """
+    if not quote:
+        return ""
+    s = str(quote).lower()
+    for token in {f"{v:g}", str(int(v)) if float(v).is_integer() else f"{v:g}"}:
+        i = s.find(token)
+        while i >= 0:
+            window = s[i + len(token): i + len(token) + 8]
+            for kind, pat in _UNIT_PATTERNS.items():
+                if re.search(pat, window):
+                    return kind
+            i = s.find(token, i + 1)
+    return ""

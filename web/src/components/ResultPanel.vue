@@ -15,6 +15,19 @@ const savedText = computed(() => {
   const p2 = (n) => String(n).padStart(2, '0')
   return `${p2(d.getMonth() + 1)}-${p2(d.getDate())} ${p2(d.getHours())}:${p2(d.getMinutes())}`
 })
+// 工艺补全的可见性：补了多少、按什么规则补的（paper-level = 整篇共用一条工艺）
+const card = computed(() => props.result?.process_card || null)
+const cardText = computed(() => {
+  const c = card.value
+  if (!c || c.error || !c.filled) return ''
+  return `工艺补全 ${c.filled} 格`
+})
+const cardTitle = computed(() => {
+  const c = card.value || {}
+  return `文档级工艺卡片：${c.docs ?? 0} 篇文献，补全 ${c.filled ?? 0} 个字段`
+    + `（按牌号命中 ${c.per_alloy ?? 0} 条 / 整篇共用 ${c.paper_level ?? 0} 条 /`
+    + ` 对不上留空 ${c.unmatched ?? 0} 条）`
+})
 const view = ref('table')
 const openRec = ref('')
 const showDropped = ref(false)
@@ -105,9 +118,23 @@ async function doExport() {
           + '请核对目标表首行的列名'
       } else {
         const dup = r.duplicate_of_existing
+        const cov = r.coverage
+        const lowCols = (cov?.low || []).filter(h => (cov.columns?.[h] ?? 0) < 0.5)
         expMsg.value = `已写入 ${w.target || expPath.value}：${r.rows} 行 / ${cells} 个单元格`
-          + (w.created ? '\n新建文件（表头+数据）' : `\n追加在原有数据下面；非预期变更 ${w.unexpected_count ?? '—'} 处`)
+          + (w.created ? '\n新建文件（表头+数据）'
+                       : '\n' + (w.upsert === false
+                           ? '追加在末尾（upsert 已关闭）'
+                           : `回填 ${w.updated_rows ?? 0} 行已有数据、新增 ${w.appended_rows ?? 0} 行`)
+                         + `；非预期变更 ${w.unexpected_count ?? '—'} 处`)
           + (dup ? `\n注意：其中 ${dup} 行与表里已有行完全相同（仍然写入了，可能点过两次）` : '')
+          + (w.ambiguous_keys
+              ? `\n注意：${w.ambiguous_keys} 条在表里能对上多个同牌号行，无法判定属于哪一条，`
+                + '已另起一行（加一列「文献」就能精确回填）'
+              : '')
+          + (cov ? `\n填充率：整体 ${(cov.overall * 100).toFixed(1)}%`
+                   + (lowCols.length
+                       ? `；低于一半的列：${lowCols.map(h => `${h} ${(cov.columns[h] * 100).toFixed(0)}%`).join('、')}`
+                       : '') : '')
           + (r.skipped_columns?.length ? `\n跳过（表里没有对应列）：${r.skipped_columns.join('、')}` : '')
           + (r.column_mapping?.length ? `\n列名对齐：${r.column_mapping.join('；')}` : '')
           + `\n${cleanSummary(r.clean_report)}`
@@ -135,6 +162,8 @@ const toggle = (id) => { openRec.value = openRec.value === id ? '' : id }
             :title="'这批结果产生于 ' + savedText + '，与当前时间对比即可判断是否最新'">
         {{ savedText }} · {{ (result.records || []).length }} 条
       </span>
+      <span v-if="cardText" class="ml-1 shrink-0 text-[10.5px]"
+            :style="{ color: 'var(--muted)' }" :title="cardTitle">{{ cardText }}</span>
       <div v-if="result" class="flex items-center gap-1">
         <button class="btn btn-ghost h-[24px] px-2 text-[11.5px]"
                 :style="view === 'table' ? { color: 'var(--accent)', fontWeight: 600 } : {}"

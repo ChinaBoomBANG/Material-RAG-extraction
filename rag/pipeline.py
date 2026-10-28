@@ -285,9 +285,21 @@ class RagPipeline:
         records = self.extractor.extract(chunks, specs, workers=max(1, int(workers)),
                                          on_event=on_event, should_stop=should_stop,
                                          context_of=context_of)
+        # 文档级工艺补全：工艺参数在论文里常常只说一次（实验段落），
+        # 块级抽取看不到跨块信息，工艺列就会几乎全空。这里每篇补一次。
+        card_stats = None
+        card_conf = self.conf.get("extract", {}).get("process_card", {}) or {}
+        if card_conf.get("enabled", True) and records:
+            from .extract.process_card import apply_process_cards
+            try:
+                card_stats = apply_process_cards(self.llm, self.store, records,
+                                                 specs, self.conf, on_event=on_event)
+            except Exception as e:          # 卡片只是增强，失败不能把整批抽取带崩
+                card_stats = {"error": f"{type(e).__name__}: {e}"}
         return {"records": records, "specs": specs, "schema": matched_info,
                 "schema_def": schema_def, "picked_chunks": len(chunks),
                 "records_count": len(records), "workers": max(1, int(workers)),
+                "process_card": card_stats,
                 # 用抽取器记录的真实状态：不能在这里再调 should_stop()——
                 # 用户点过停止后 cancel 标记会一直为 True，会把没被中断的任务误报成「提前停止」
                 "stopped_early": bool(self.extractor.stopped_early),
