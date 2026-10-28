@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import argparse
+import glob
 import json
 import os
 import shutil
@@ -25,10 +26,10 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 WEB = os.path.join(ROOT, "web")
 DIST = os.path.join(ROOT, "rag", "web", "dist")
 
+# PATH 上找不到 npm 时的额外搜索目录。用环境变量 NODE_DIR 指定（多个用 ; 分隔），
+# 不写死任何人的本机路径——仓库是公开的。
 NODE_FALLBACKS = [
-    r"C:\Users\25585\.workbuddy\binaries\node\versions\22.22.2-6",
-    r"C:\Users\25585\.workbuddy\binaries\node\versions\22.22.2-3",
-    r"D:\yingyong\nodejs",
+    d for d in os.environ.get("NODE_DIR", "").split(os.pathsep) if d.strip()
 ]
 
 COMSPEC = os.environ.get("COMSPEC", r"C:\Windows\System32\cmd.exe")
@@ -57,14 +58,34 @@ def _decode(raw: bytes) -> str:
     return raw.decode("utf-8", "replace")
 
 
-def _npm_candidates() -> list[str]:
-    """候选顺序：已知可用的托管目录 > PATH > 其他目录。
+def _extra_npm_dirs() -> list[str]:
+    """PATH 之外的 npm 搜索目录：环境变量 NODE_DIR > 常见安装位置 > 版本管理器目录。
 
-    本机 22.22.2-3 目录里的 npm 是残缺的（报 Cannot find module
-    '../../package.json'），而 shutil.which 恰好先命中它，所以不能只信 PATH。
+    不写死任何人的绝对路径（仓库公开），但本机照常能找到 node。
+    """
+    dirs = [d for d in os.environ.get("NODE_DIR", "").split(os.pathsep) if d.strip()]
+    pf = os.environ.get("ProgramFiles", r"C:\Program Files")
+    local = os.environ.get("LOCALAPPDATA", "")
+    for d in (os.path.join(pf, "nodejs"),
+              os.path.join(local, "Programs", "nodejs"),
+              os.path.join(local, "Programs", "nodejs", "node")):
+        if d.strip(os.path.sep):
+            dirs.append(d)
+    for pat in (os.path.expanduser("~/.workbuddy/binaries/node/versions/*"),
+                os.path.expanduser("~/.nvm/versions/node/*"),
+                os.path.expanduser("~/.volta/tools/image/node/*")):
+        dirs += sorted(glob.glob(pat))
+    return dirs
+
+
+def _npm_candidates() -> list[str]:
+    """候选顺序：已知目录 > PATH。
+
+    有些 node 目录是残缺的（npm 报 Cannot find module '../../package.json'），
+    而 shutil.which 恰好会先命中它，所以每个候选都要真跑一次 --version 才算数。
     """
     cands: list[str] = []
-    for d in NODE_FALLBACKS:
+    for d in NODE_FALLBACKS + _extra_npm_dirs():
         for name in ("npm.cmd", "npm.CMD", "npm"):
             p = os.path.join(d, name)
             if os.path.isfile(p):

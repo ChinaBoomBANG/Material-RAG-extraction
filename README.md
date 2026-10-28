@@ -1,6 +1,7 @@
 # MaterialRAG
 
-面向材料文献（当前以铝合金 6xxx 系为重点）的**检索增强问答 + 结构化数据抽取**框架。
+面向材料文献的**检索增强问答 + 结构化数据抽取**框架。内置字段词典覆盖铝合金等常见体系
+（成分 / 工艺 / 组织 / 性能），但**不绑定任何一套具体字段**：换体系、换表格都是改模板，不改代码。
 
 两条主线：
 
@@ -61,8 +62,9 @@ RAG/
     ├── index/                 索引产物（chunks / vectors / bm25 / docs）
     ├── schemas/               抽取模板
     │   ├── builtin/             内置模板（自动生成，勿手改）
-    │   ├── al_no_balance.yaml   「铝合金无余量模板」92 字段（删掉 Al/Al_pred）
-    │   └── 铝合金精简模板.yaml   「铝合金精简模板」自定义 22 字段（含 RE 其他元素）
+    │   ├── al_no_balance.yaml   「铝合金无余量模板」92 字段（内置模板去掉 Al/Al_pred）
+    │   ├── 铝合金精简模板.yaml   精简示例模板（17 字段，演示自定义模板长什么样）
+    │   └── *.yaml               你自己的模板（见第九节；涉及自己数据结构的建议别入库）
     ├── output/                预览、证据表、diff 报告、Excel 备份、web.log
     └── models/                embedding 模型
 ```
@@ -95,15 +97,14 @@ RAG/
 
 ### 0. 准备（只需一次）
 
-项目使用**你本地的 Python 3.12**（`D:\python\python.exe`）建立独立虚拟环境 `my_venv`，
-不依赖 WorkBuddy 托管环境，可脱离它运行。
+需要 **Python 3.12**。在项目目录里建一个独立虚拟环境 `my_venv`：
 
 ```bash
-cd C:/Users/25585/Desktop/RAG
+cd <你的项目目录>
 
-# 建虚拟环境（你在自己终端里执行）
-D:\python\python.exe -m venv my_venv
-my_venv\Scripts\activate                      # 激活；之后直接用 python
+# 建虚拟环境（Windows 上若 python 不是 3.12，可用 py -3.12 -m venv my_venv）
+python -m venv my_venv
+my_venv\Scripts\activate                      # Linux/macOS：source my_venv/bin/activate
 
 # 依赖：torch 必须单独装 CPU 版（PyPI 上的同名包是约 2GB 的 CUDA 版）
 python -m pip install torch==2.14.1 --index-url https://download.pytorch.org/whl/cpu
@@ -113,9 +114,8 @@ python -m pip install -r requirements.txt
 python scripts/fetch_embedding_model.py
 ```
 
-> 说明：在 WorkBuddy 里我以绝对路径 `my_venv/Scripts/python.exe` 调用，
-> 效果等同于你手动 `activate`。本机已验证：Python 3.12.8、未装 scikit-learn、
-> 自测 148 项全部通过、Web 服务正常。
+> 不激活也可以直接使用 `my_venv\Scripts\python.exe`（下文命令都写成这种形式），
+> 效果与先 `activate` 再敲 `python` 完全相同。
 
 ### 1. 让 LM Studio 提供接口
 
@@ -431,7 +431,7 @@ SSE 事件补发、任务接管时效、结果落盘与重开恢复。**全部�
 
 ---
 
-## 六、性能实测（本机：16 核 CPU / 32 GB 内存 / 无独显）
+## 六、性能实测（参考机：16 核 CPU / 32 GB 内存 / 无独显）
 
 以下为真实测量值，不是估算：
 
@@ -494,7 +494,7 @@ my_venv\Scripts\python.exe scripts\build_web.py --check
 my_venv\Scripts\python.exe scripts\build_web.py --clean
 ```
 
-构建脚本做的事：探测可用的 npm（本机 `22.22.2-3` 目录里的 npm 是残缺的，脚本会逐个探测并跳过坏的）→ `node_modules` 缺失或 `package.json` 更新才 `npm install` → `vite build` → 自检 `index.html` 与 `assets/` 是否齐全。实测一次全量构建约 3 秒（增量跳过安装）。
+构建脚本做的事：探测可用的 npm（会自动跳过残缺的 node 目录）→ `node_modules` 缺失或 `package.json` 更新才 `npm install` → `vite build` → 自检 `index.html` 与 `assets/` 是否齐全。实测一次全量构建约 3 秒（增量跳过安装）。
 
 开发模式（热更新，后端仍用 8848）：
 
@@ -507,10 +507,10 @@ npm run dev        :: 打开 http://127.0.0.1:5273 ，/api 自动代理到 8848
 
 抽取字段不再写死。模板可以放 `data/schemas/*.yaml`，也可以在界面里粘贴 YAML/JSON 后直接抽（不落盘也行）。
 
-最小示例（完整示例见 `data/schemas/铝合金精简模板.yaml`）：
+最小示例（存成 `data/schemas/my.yaml` 就能在界面和命令行里选中）：
 
 ```yaml
-name: 铝合金精简模板
+name: 我的合金模板
 key_field: alloy
 groups:
   - key: chemical
@@ -556,7 +556,7 @@ groups:
 **另存为模板的同名覆盖**：点「另存为模板」且名字与现有用户模板相同时，**覆盖原文件**
 而不是新建——改字段后另存同名就是更新，不会出现两个同名模板。
 
-**RE 字段 = 其他元素**（铝合金精简模板）：字段清单之外的成分列（Be、Ca、Sr、Ce 等）
+**RE 字段 = 其他元素**（自定义模板里的常见写法）：字段清单之外的成分列（Be、Ca、Sr、Ce 等）
 由模型按「元素=数值」合并写进 RE（text 类型，分号分隔，如 `Be=0.05; Sr=0.01`），
 不会丢数据。规则写在抽取提示词第 10 条；模板里 RE 带 hint 说明。
 
@@ -572,7 +572,7 @@ groups:
 命令行同样支持：
 
 ```bat
-my_venv\Scripts\python.exe -m rag.cli fill --schema 铝合金精简模板 --mode table
+my_venv\Scripts\python.exe -m rag.cli fill --schema 我的合金模板 --mode table
 my_venv\Scripts\python.exe -m rag.cli fill --schema al_no_balance --mode table
 my_venv\Scripts\python.exe -m rag.cli fill --schema data\schemas\my.yaml --excel target.xlsx --yes
 ```
