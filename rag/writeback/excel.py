@@ -74,8 +74,18 @@ class ExcelTarget:
         alloy_spec = specs.get("alloy")
         groups = ("composition", "process", "microstructure", "properties")
 
+        # 目标表里有「文献 / 来源」列时，把来源写进去：没有它，出了错也追不回是哪篇
+        doc_col = ""
+        for key, sp in specs.items():
+            lab = f"{sp.label or ''} {sp.column or ''}".lower()
+            if any(h in lab for h in ("文献", "来源", "source", "论文", "doi")):
+                doc_col = sp.column or sp.label
+                break
+
         for rec in records:
             row: dict = {}
+            if doc_col and rec.source_doc:
+                row[doc_col] = rec.source_doc
             if rec.alloy and alloy_spec is not None:
                 row[alloy_spec.column] = rec.alloy
                 evidence.append({

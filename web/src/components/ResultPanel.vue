@@ -28,6 +28,23 @@ const cardTitle = computed(() => {
     + `（按牌号命中 ${c.per_alloy ?? 0} 条 / 整篇共用 ${c.paper_level ?? 0} 条 /`
     + ` 对不上留空 ${c.unmatched ?? 0} 条）`
 })
+// 成形统计：一行一个样品之前/之后的行数与分组数
+const joinStats = computed(() => props.result?.join || null)
+const joinText = computed(() => {
+  const j = joinStats.value
+  if (!j || j.error || !j.records_before) return ''
+  return `成形 ${j.records_before} -> ${j.rows_after} 行`
+})
+const joinTitle = computed(() => {
+  const j = joinStats.value || {}
+  const inh = j.inherit || {}
+  const lk = j.link || {}
+  const sh = j.shape || {}
+  return `表连接与成形：记录 ${j.records_before ?? 0} -> 行 ${j.rows_after ?? 0}；`
+    + `继承补 ${inh.filled ?? 0} 格（${inh.records ?? 0} 条记录）；`
+    + `标签对齐 规则 ${lk.rule_linked ?? 0} / 模型 ${lk.llm_linked ?? 0} / 未匹配 ${lk.unmatched ?? 0}；`
+    + `同样品多条件 ${sh.multi_condition ?? 0} 组、同名不同成分拆开 ${sh.split_same_label ?? 0} 组`
+})
 // 多轮定向补全：跑了几个轮、补了多少格、有没有收敛
 const rounds = computed(() => props.result?.rounds || null)
 const roundsText = computed(() => {
@@ -184,6 +201,8 @@ const toggle = (id) => { openRec.value = openRec.value === id ? '' : id }
             :style="{ color: 'var(--muted)' }" :title="cardTitle">{{ cardText }}</span>
       <span v-if="roundsText" class="ml-1 shrink-0 text-[10.5px]"
             :style="{ color: 'var(--muted)' }" :title="roundsTitle">{{ roundsText }}</span>
+      <span v-if="joinText" class="ml-1 shrink-0 text-[10.5px]"
+            :style="{ color: 'var(--muted)' }" :title="joinTitle">{{ joinText }}</span>
       <div v-if="result" class="flex items-center gap-1">
         <button class="btn btn-ghost h-[24px] px-2 text-[11.5px]"
                 :style="view === 'table' ? { color: 'var(--accent)', fontWeight: 600 } : {}"

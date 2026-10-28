@@ -1709,6 +1709,83 @@ def t_rounds() -> None:
           and fr["overall"] == 0.0, f"{fr}")
 
 
+# ------------------------------- 26. 表连接与"一行一个样品"
+
+def t_join_rows() -> None:
+    """散落的记录要按样品拼成一行，拼的时候不许把不同条件的数据搅在一起。"""
+    print("\n[26] 表连接与一行一个样品")
+    from rag.extract.join import (inherit_within_sample, link_labels, run_join,
+                                  shape_rows)
+    from rag.models import Evidence, FieldValue, MaterialRecord
+
+    def comp(**kw):
+        return {k: FieldValue(value=v, unit="wt.%",
+                              evidence=Evidence(quote=f"{k} {v}", verified=True))
+                for k, v in kw.items()}
+
+    # ---- 场景：M3 有两个时效条件，成分只在第一条记录上 ----
+    a = MaterialRecord(alloy="M3", source_doc="p.pdf", row_label="M3")
+    a.composition = comp(Si=1.2, Mg=0.7)
+    a.properties["UTS"] = FieldValue(value=210, unit="MPa")
+    a.process["aging_temp"] = FieldValue(value=175, unit="°C")
+    b = MaterialRecord(alloy="M3", source_doc="p.pdf", row_label="M3")
+    b.properties["UTS"] = FieldValue(value=190, unit="MPa")
+    b.process["aging_temp"] = FieldValue(value=190, unit="°C")
+
+    st = inherit_within_sample([a, b])
+    check("同（文献, 标签）内成分继承到另一条条件记录",
+          st["records"] == 1 and b.composition.get("Si") is not None,
+          f"{st} / {list(b.composition)}")
+
+    rows, s3 = shape_rows([a, b])
+    check("同一样品两个条件 -> 两行，各自带自己的性能与工艺",
+          len(rows) == 2
+          and sum(1 for r in rows if r.properties.get("UTS").value == 210) == 1
+          and sum(1 for r in rows if r.properties.get("UTS").value == 190) == 1,
+          f"{[(r.alloy, r.properties.get('UTS').value) for r in rows]}")
+    check("两行都带上了成分（不是只有第一行有）",
+          all(r.composition.get("Si") is not None for r in rows),
+          f"{[list(r.composition) for r in rows]}")
+
+    # ---- 表连接：确定性能匹配的才连 ----
+    c = MaterialRecord(alloy="AA6082", source_doc="q.pdf", row_label="AA6082")
+    c.properties["UTS"] = FieldValue(value=310, unit="MPa")
+    d = MaterialRecord(alloy="6082", source_doc="q.pdf", row_label="6082")
+    d.composition = comp(Si=1.0, Mg=0.6)
+    e = MaterialRecord(alloy="Some other alloy", source_doc="q.pdf")
+    e.properties["UTS"] = FieldValue(value=280, unit="MPa")
+
+    st = link_labels([c, d, e], llm=None)
+    check("AA6082 与 6082 被确定性连接上",
+          st["rule_linked"] >= 1 and c.__dict__.get("linked_label") == "6082",
+          f"{st['rule_linked']} / {c.__dict__.get('linked_label')}")
+    check("字面判断不了的标签不硬配",
+          "linked_label" not in e.__dict__ and st["unmatched"] >= 1, f"{st['unmatched']}")
+
+    # ---- 只有成分的样品也要占一行 ----
+    solo = MaterialRecord(alloy="A1", source_doc="r.pdf", row_label="A1")
+    solo.composition = comp(Si=0.9)
+    rows, _ = shape_rows([solo])
+    check("只有成分的样品也输出一行（不丢样品）",
+          len(rows) == 1 and rows[0].composition.get("Si") is not None)
+
+    # ---- 无标签记录原样保留 ----
+    loose = MaterialRecord(alloy="", source_doc="r.pdf")
+    loose.properties["UTS"] = FieldValue(value=200, unit="MPa")
+    rows, _ = shape_rows([loose])
+    check("没有标签的记录原样保留（不猜它属于谁）",
+          len(rows) == 1 and rows[0].properties.get("UTS").value == 200)
+
+    # ---- 端到端：继承 + 连接 + 成形 ----
+    conf = copy.deepcopy(cfg.load())
+    conf["extract"]["join"] = {"enabled": True, "inherit": True,
+                               "link_labels": True, "llm_link": False}
+    out, stats = run_join([a, b, c, d, e], llm=None, conf=conf)
+    check("run_join 端到端产出成形行并给出统计",
+          len(out) >= 3 and stats.get("rows_after") == len(out),
+          f"{len(out)} / {stats.get('rows_after')}")
+
+
 def main() -> int:
     tmp = tempfile.mkdtemp(prefix="ragtest_")
     try:
@@ -1737,6 +1814,7 @@ def main() -> int:
         t_quantity_guard()
         t_process_card()
         t_rounds()
+        t_join_rows()
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 

@@ -236,6 +236,7 @@ def _extract_payload(res: dict, excel_path: str | None) -> dict:
         "schema_groups": ([g.to_dict() for g in sdef.groups] if sdef else []),
         "dropped": res.get("dropped", []),
         "process_card": res.get("process_card"),
+        "join": res.get("join"),
         "rounds": (_save_rounds_log(res["rounds"]) if isinstance(res.get("rounds"), dict)
                    else res.get("rounds")),
         "headers": headers,

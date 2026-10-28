@@ -285,6 +285,19 @@ class RagPipeline:
         records = self.extractor.extract(chunks, specs, workers=max(1, int(workers)),
                                          on_event=on_event, should_stop=should_stop,
                                          context_of=context_of)
+        # 表格与上下文连接 + 一行一个样品：把散落的成分/工艺/性能记录按样品拼起来。
+        # 这一步不做的话，同一批样品会被拆成好几行（实测 979 条记录里 342 条只剩性能）。
+        join_stats = None
+        join_conf = self.conf.get("extract", {}).get("join", {}) or {}
+        if join_conf.get("enabled", True) and records:
+            from .extract.join import run_join
+            try:
+                joined, join_stats = run_join(records, self.llm, self.conf)
+                if joined:
+                    records = joined
+            except Exception as e:
+                join_stats = {"error": f"{type(e).__name__}: {e}"}
+
         # 文档级工艺补全：工艺参数在论文里常常只说一次（实验段落），
         # 块级抽取看不到跨块信息，工艺列就会几乎全空。这里每篇补一次。
         card_stats = None
@@ -314,6 +327,7 @@ class RagPipeline:
                 "records_count": len(records), "workers": max(1, int(workers)),
                 "process_card": card_stats,
                 "rounds": rounds_stats,
+                "join": join_stats,
                 # 用抽取器记录的真实状态：不能在这里再调 should_stop()——
                 # 用户点过停止后 cancel 标记会一直为 True，会把没被中断的任务误报成「提前停止」
                 "stopped_early": bool(self.extractor.stopped_early),
