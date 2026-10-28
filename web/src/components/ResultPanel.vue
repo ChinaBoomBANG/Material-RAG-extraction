@@ -90,9 +90,18 @@ async function doExport() {
     } else {
       const r = await api.exportXlsx(payload)
       const w = r.write || {}
-      expMsg.value = `已写入 ${w.target || expPath.value}（${r.rows} 行）`
-        + (w.created ? '\n新建文件' : `\n非预期变更 ${w.unexpected_count ?? '—'} 处`)
-        + `\n${cleanSummary(r.clean_report)}`
+      const cells = r.written_cells ?? 0
+      if (!cells) {                                   // 一个格子都没落上去 = 失败，不能报成功
+        expMsg.value = '导出失败：一个单元格都没写入（已退出，未改动你的表格）\n'
+          + (r.skipped_columns?.length ? `对不上的列：${r.skipped_columns.join('、')}\n` : '')
+          + '请核对目标表首行的列名'
+      } else {
+        expMsg.value = `已写入 ${w.target || expPath.value}：${r.rows} 行 / ${cells} 个单元格`
+          + (w.created ? '\n新建文件' : `\n非预期变更 ${w.unexpected_count ?? '—'} 处`)
+          + (r.skipped_columns?.length ? `\n跳过（表里没有对应列）：${r.skipped_columns.join('、')}` : '')
+          + (r.column_mapping?.length ? `\n列名对齐：${r.column_mapping.join('；')}` : '')
+          + `\n${cleanSummary(r.clean_report)}`
+      }
     }
   } catch (e) {
     expMsg.value = '导出失败：' + e.message

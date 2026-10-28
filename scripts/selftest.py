@@ -843,8 +843,12 @@ def t_chunk_plan(tmp: str):
           (not _h.get("ok")) and _dt < 1.0, f"{_dt:.2f}s, ok={_h.get('ok')}")
 
     # ---- 刷新后接管任务：_running_job 的状态判定 ----
+    # _RESTORED_DONE=True 屏蔽"从磁盘恢复上一批"这一步：本用例只测内存里的接管逻辑，
+    # 不能让本机 data/output/last_extract.json 里真实的上批结果掺进来。
+    import rag.web.app as _WA
     from rag.web.app import _running_job as _rj, _JOBS as _J
     _saved = dict(_J)
+    _saved_restored, _WA._RESTORED_DONE = _WA._RESTORED_DONE, True
     try:
         _J.clear()
         check("无任务时不接管", _rj() == {})
@@ -875,6 +879,7 @@ def t_chunk_plan(tmp: str):
     finally:
         _J.clear()
         _J.update(_saved)
+        _WA._RESTORED_DONE = _saved_restored
 
 
 # ---------------------------------------------------------------- 15. 启动脚本
@@ -960,6 +965,7 @@ def t_adopt_ttl() -> None:
     from rag.web import app as webapp
 
     saved = dict(webapp._JOBS)
+    saved_restored, webapp._RESTORED_DONE = webapp._RESTORED_DONE, True
     now = 1_000_000.0
     try:
         webapp._JOBS.clear()
@@ -988,6 +994,7 @@ def t_adopt_ttl() -> None:
     finally:
         webapp._JOBS.clear()
         webapp._JOBS.update(saved)
+        webapp._RESTORED_DONE = saved_restored
 
 
 # ---------------------------------------------------------------- 18. 对齐 + 合理性
@@ -1191,6 +1198,93 @@ def t_result_persist() -> None:
         shutil.rmtree(tmpdir, ignore_errors=True)
 
 
+# ------------------------------------------------- 21. 写表：列名对不上必须报错不能报成功
+
+def _verified_record():
+    from rag.models import Evidence, FieldValue, MaterialRecord
+    rec = MaterialRecord(alloy="6013", row_label="6013", source_doc="demo.pdf",
+                         source_page=2, record_id="r1")
+    for el, v in (("Si", 0.62), ("Mg", 0.85)):
+        rec.composition[el] = FieldValue(
+            value=v, unit="wt.%", parsed={"kind": "single", "value": v},
+            evidence=Evidence(quote=str(v), chunk_id="c1", page=2,
+                              doc_name="demo.pdf", verified=True))
+    return rec
+
+
+def t_excel_write_mapping() -> None:
+    """导出写表：列名写法不同要能对齐，一列都对不上必须报错而不是假装成功。"""
+    print("\n[21] 写表的列名对齐与失败可见性")
+    import openpyxl
+
+    from rag.extract.schema import strict_spec_for_header
+    from rag.web.app import ExportReq, _map_rows_to_headers, export_data
+
+    key = lambda h: (lambda sp: sp.key if sp else None)(strict_spec_for_header(h))
+    check("Si (wt.%) -> composition.Si", key("Si (wt.%)") == "composition.Si")
+    check("Mg 含量 -> composition.Mg", key("Mg 含量") == "composition.Mg")
+    check("硅 -> composition.Si", key("硅") == "composition.Si")
+    check("牌号 -> alloy", key("牌号") == "alloy")
+    check("w(Si) -> composition.Si", key("w(Si)") == "composition.Si")
+    check("'其余' 这种含糊表头不硬猜 -> None", key("其余") is None)
+
+    rec = _verified_record()
+    sd_yaml = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                                "data", "schemas", "al_no_balance.yaml"),
+                   encoding="utf-8").read()
+    tmpdir = tempfile.mkdtemp(prefix="ragtest_write_")
+
+    def export(headers, name, make_file=True):
+        p = os.path.join(tmpdir, f"{name}.xlsx")
+        if make_file:
+            wb = openpyxl.Workbook()
+            ws = wb.active
+            ws.title = "data"
+            if headers:
+                ws.append(headers)
+            wb.save(p)
+            wb.close()
+        res = export_data(ExportReq(records=[rec.to_dict()], schema_text=sd_yaml,
+                                    format="xlsx", excel_path=p, clean={}))
+        body = res if isinstance(res, dict) else json.loads(res.body.decode())
+        grid = [tuple(r) for r in openpyxl.load_workbook(p).active.iter_rows(values_only=True)]
+        return body, grid
+
+    # 关键回归：表头带单位时原来一个格子都写不进去，却照样返回"成功"
+    body, grid = export(["合金牌号", "Si (wt.%)", "Mg (wt.%)"], "unit")
+    check("表头带单位 -> 真的写进去了",
+          int(body.get("written_cells") or 0) > 0
+          and grid[1][1] == 0.62 and grid[1][2] == 0.85, str(grid[:2]))
+    check("改名对齐要在返回值里可查",
+          any("Si -> Si (wt.%)" in m for m in body.get("column_mapping") or []))
+
+    body, grid = export(["牌号", "硅", "镁"], "alias")
+    check("中文别名表头 -> 写进对应列",
+          int(body.get("written_cells") or 0) == 3
+          and grid == [("牌号", "硅", "镁"), ("6013", 0.62, 0.85)], str(grid))
+
+    body, grid = export(["序号", "备注", "日期"], "unrelated")
+    check("一列都对不上 -> 明确失败（不是假成功）",
+          body.get("ok") is False and body.get("error"), str(body.get("ok")))
+    check("失败时不许改动用户的表", grid == [("序号", "备注", "日期")], str(grid))
+
+    body, grid = export([], "empty")
+    check("空表（无表头）-> 自动建表头再写数据",
+          grid[0][:3] == ("合金牌号", "Si", "Mg"), str(grid[0]))
+
+    # 纯函数层：模板列 -> 目标列名
+    specs = {"alloy": None}
+    from rag.extract.schema import BY_KEY
+    sps = {"alloy": BY_KEY["alloy"], "composition.Si": BY_KEY["composition.Si"]}
+    mapped, mapping, skipped = _map_rows_to_headers(
+        [{"合金牌号": "A", "Si": 0.6}], sps, ["牌号", "硅"])
+    check("行改名：模板列换为目标表真实列名",
+          mapped == [{"牌号": "A", "硅": 0.6}] and len(mapping) == 2 and skipped == [],
+          f"{mapped} / {mapping} / {skipped}")
+
+    shutil.rmtree(tmpdir, ignore_errors=True)
+
+
 def main() -> int:
     tmp = tempfile.mkdtemp(prefix="ragtest_")
     try:
@@ -1214,6 +1308,7 @@ def main() -> int:
         t_alignment()
         t_sanity_range()
         t_result_persist()
+        t_excel_write_mapping()
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 

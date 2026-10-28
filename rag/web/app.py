@@ -776,7 +776,7 @@ def _ordered_headers(rows: list[dict], specs: dict) -> list[str]:
 
 
 def _write_new_xlsx(path: str, headers: list[str], rows: list[dict]) -> dict:
-    """目标文件不存在时新建（不涉及备份/diff：新文件没有旧内容可破坏）。"""
+    """目标文件不存在（或为空表）时从头写：先表头，再数据。"""
     import openpyxl
     os.makedirs(os.path.dirname(os.path.abspath(path)) or ".", exist_ok=True)
     wb = openpyxl.Workbook()
@@ -787,7 +787,66 @@ def _write_new_xlsx(path: str, headers: list[str], rows: list[dict]) -> dict:
         ws.append([r.get(h) for h in headers])
     wb.save(path)
     return {"ok": True, "created": True, "target": path, "rows": len(rows),
-            "columns": len(headers), "unexpected_count": 0}
+            "columns": len(headers), "written_cells": len(rows) * len(headers),
+            "unexpected_count": 0}
+
+
+def _map_rows_to_headers(rows: list[dict], specs: dict,
+                         headers: list[str]) -> tuple[list[dict], list[str], list[str]]:
+    """把「模板列名」行改写为「目标表真实列名」行。
+
+    为什么要这一步：记录里的键来自**模板**的列（如 Si），
+    而 ExcelTarget.write 是按**目标表**的列名定位单元格的。两边写法只要有一点点
+    不同（Si(wt.%) / Si 含量 / 硅 / 牌号），原来的实现就整行匹配不上——
+    结果是 0 个单元格写成，却照样返回"成功"，界面显示"已写入 N 行"。
+
+    匹配走 strict_spec_for_header（别名原样 + 元素带单位），不做含糊的子串兜底：
+    宁可明确告诉用户"这一列对不上"，也不擅自把值塞进表里看起来像的那一列。
+
+    返回 (改名后的行, ["模板列 -> 目标列", ...], 未能匹配而被跳过的模板列)。
+    """
+    from ..extract.schema import _norm, strict_spec_for_header
+
+    norm_map = {}
+    for h in headers:
+        h = (h or "").strip()
+        if h:
+            norm_map.setdefault(_norm(h), h)
+
+    key_by_col: dict[str, str] = {}
+    for k, sp in specs.items():
+        key_by_col.setdefault(sp.column, k)
+
+    # 目标列名 -> 模板列（先靠标准字段，再靠列名/别名完全相同）
+    col_to_header: dict[str, str] = {}
+    for h in norm_map.values():
+        sp = strict_spec_for_header(h)
+        if sp is not None:
+            for col, k in key_by_col.items():
+                if k == sp.key:
+                    col_to_header.setdefault(col, h)
+    for k, sp in specs.items():
+        for cand in (sp.column, sp.label, *(sp.aliases or [])):
+            hit = norm_map.get(_norm(cand))
+            if hit:
+                col_to_header.setdefault(sp.column, hit)
+
+    header_set = set(norm_map.values())
+    mapped, mapping, skipped = [], [], set()
+    for row in rows:
+        out: dict = {}
+        for col, v in row.items():
+            target = col_to_header.get(col)
+            if target is None and col in header_set:      # 逐字相同也认
+                target = col
+            if target is None:
+                skipped.add(col)
+                continue
+            out[target] = v
+            if target != col:
+                mapping.append(f"{col} -> {target}")
+        mapped.append(out)
+    return mapped, sorted(set(mapping)), sorted(skipped)
 
 
 @app.post("/api/export")
@@ -874,13 +933,51 @@ def export_data(req: ExportReq):
                                 content={"ok": False,
                                          "error": "导出 Excel 需要先填目标路径"})
         target = os.path.abspath(req.excel_path)
-        if os.path.exists(target):
-            wres = excel_target()(target, cfg.load()).write(rows, dry_run=False)
-        else:
+        if not os.path.exists(target):
+            # 文件不存在：按模板列名从头建（表头 + 数据）
             wres = _write_new_xlsx(target, headers, rows)
-        return {"ok": True, "format": "xlsx", "write": wres,
-                "rows": len(rows), "columns": len(headers),
-                "headers": headers, "deduped": deduped,
+            return {"ok": True, "format": "xlsx", "write": wres,
+                    "rows": len(rows), "columns": len(headers),
+                    "headers": headers, "deduped": deduped,
+                    "written_cells": wres["written_cells"], "column_mapping": [],
+                    "skipped_columns": [],
+                    "balance_added": balance_added,
+                    "clean_report": report, "schema": sdef.to_dict()}
+
+        tgt = excel_target()(target, cfg.load())
+        target_headers = tgt.headers()
+        if not any(h.strip() for h in target_headers):
+            # 表存在但是空表：表头都没有，按模板列先建表头再写数据
+            wres = _write_new_xlsx(target, headers, rows)
+            return {"ok": True, "format": "xlsx", "write": wres,
+                    "rows": len(rows), "columns": len(headers),
+                    "headers": headers, "deduped": deduped,
+                    "written_cells": wres["written_cells"], "column_mapping": [],
+                    "skipped_columns": [],
+                    "balance_added": balance_added,
+                    "clean_report": report, "schema": sdef.to_dict()}
+
+        # 关键一步：把「模板列名」换成「目标表真实列名」
+        mapped_rows, mapping, skipped = _map_rows_to_headers(rows, specs, target_headers)
+        if not any(mapped_rows):
+            return JSONResponse(status_code=400, content={
+                "ok": False,
+                "error": "目标表的列名与这一批数据的字段一列都对不上，已放弃写入"
+                         "（没有改动你的表格）",
+                "target": target,
+                "target_headers": [h for h in target_headers if h.strip()][:30],
+                "row_columns": sorted({c for r in rows for c in r})[:30],
+                "hint": "把目标表首行改成模板里的列名（如 合金牌号 / Si / Mg），"
+                        "或换一个本来就有这些表头的表。"})
+
+        wres = tgt.write(mapped_rows, dry_run=False)
+        written = int(wres.get("written_cells") or 0)
+        return {"ok": written > 0, "format": "xlsx", "write": wres,
+                "rows": len(mapped_rows), "columns": len(target_headers),
+                "headers": [h for h in target_headers if h.strip()],
+                "deduped": deduped,
+                "written_cells": written,
+                "column_mapping": mapping, "skipped_columns": skipped,
                 "balance_added": balance_added,
                 "clean_report": report, "schema": sdef.to_dict()}
     except Exception as e:

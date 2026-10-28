@@ -237,6 +237,34 @@ def match_header(header: str) -> FieldSpec | None:
     return None
 
 
+def strict_spec_for_header(header: str) -> FieldSpec | None:
+    """保守版表头匹配：只接受「别名原样」和「元素+单位」两种确定性写法。
+
+    与 match_header 的区别：去掉了最后那步"子串包含兜底"。
+    抽取时用宽松匹配无妨（不确定就变成了自定义列）；但**写回 Excel** 时
+    子串兜底会把数据塞进不该去的列（例如表头"Al 余量说明"命中了 Al 列），
+    属于擅自改写用户的表。这里宁可对不上、明确告诉用户，也不猜。
+    """
+    n = _norm(header)
+    if not n:
+        return None
+    key = _ALIAS_INDEX.get(n)
+    if key:
+        return BY_KEY.get(key)
+    # 中文/全称写法带了单位尾巴：硅含量 / 屈服强度 MPa —— 去掉尾巴再认一次
+    tail = re.sub(r"(含量|质量分数|wt\.?%|at\.?%|wt|at|ppm|mpa|gpa|hv|hb|%)$", "", n)
+    if tail and tail != n and tail in _ALIAS_INDEX:
+        return BY_KEY[_ALIAS_INDEX[tail]]
+    # 成分列的常见写法：Si(wt.%) / Si 含量 / w(Si)
+    # 必须用 fullmatch：元素符号之后只允许跟单位尾巴。用 search 时
+    # "siwt.%" 会被贪心截成 "siw"，连 Si 都对不上（实测踩过）。
+    m = re.fullmatch(
+        r"w?([a-z]{1,3})(?:含量|质量分数|wt\.?%|at\.?%|wt|at|ppm|%)?", n)
+    if m:
+        return BY_KEY.get(f"composition.{m.group(1).capitalize()}")
+    return None
+
+
 def build_schema_from_headers(headers: list[str]) -> dict:
     """由 Excel 表头生成抽取 schema。
 
