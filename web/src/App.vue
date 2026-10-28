@@ -42,6 +42,7 @@ const excelPath = ref('')
 const running = ref(false)
 const progress = ref(null)
 const result = ref(null)
+const resultSavedAt = ref(null)   // 当前结果属于哪一批（秒级时间戳），用来回答"是不是旧的"
 const err = ref(null)
 const busy = ref(false)
 const jobId = ref('')
@@ -224,6 +225,7 @@ async function start(continueRun = false) {
   stopping.value = false
   if (!continueRun) {
     result.value = null
+    resultSavedAt.value = null
     doneIds.value = new Set()     // 全新开始：清空已抽集合
     try { localStorage.removeItem(STORAGE_KEY) } catch (e) {}
   }
@@ -248,6 +250,7 @@ async function start(continueRun = false) {
         if (ev.type === 'done') {
           // 继续抽取：新结果追加到已有结果后面，不能覆盖（否则上一批记录全没了）
           result.value = continueRun ? mergeResults(result.value, ev.result) : ev.result
+          resultSavedAt.value = Date.now() / 1000
           running.value = false
           jobId.value = ''
           stopping.value = false
@@ -325,8 +328,15 @@ async function adoptRunningJob() {
       doneIds.value = merged
       saveDoneIds()
     }
+    // 上一批是不是失败过：不提示的话，用户看到旧数据会以为"抽完了"
+    if (r.last_failed_at && r.last_failed_error) {
+      const t = new Date(r.last_failed_at * 1000).toLocaleString('zh-CN', { hour12: false })
+      err.value = `上一批抽取（${t}）失败了${r.result ? '，右侧显示的是更早一批的数据' : ''}。\n`
+        + `原因：${r.last_failed_error}`
+    }
     if (r.done && r.result) {
       result.value = r.result    // 已跑完：直接把结果还回来，不白等
+      resultSavedAt.value = r.result_saved_at || null
       progress.value = r.progress?.done
         ? { ...r.progress } : null
       return
@@ -453,7 +463,7 @@ onBeforeUnmount(() => { if (hbTimer) clearInterval(hbTimer) })
           @run="start()" @continue="continueRun" @stop="stopRun" />
 
         <ResultPanel class="h-[72vh] min-w-0 lg:col-span-2 xl:col-span-1 xl:h-full"
-                     :result="result" :running="running"
+                     :result="result" :running="running" :saved-at="resultSavedAt"
                      :schema-text="yamlText" />
       </div>
     </main>

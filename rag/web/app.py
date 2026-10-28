@@ -54,15 +54,24 @@ def pipe() -> RagPipeline:
     return _pipe
 
 
+def _log(msg: str) -> None:
+    """写一行带时间戳的运行日志。
+
+    静默启动（pythonw）没有控制台，stdout/stderr 被重定向到 data/output/web.log，
+    所以后台抽取的成败必须靠这里留痕——否则任务悄悄失败、结果不更新，
+    用户看到的永远是上一批数据，却查不到原因。
+    """
+    print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {msg}", flush=True)
+
+
 def _err(e: Exception) -> JSONResponse:
+    # 异常必须落到日志里：之前只回了 500，静默启动时没人看得见，
+    # 表现就是"点了没反应 / 数据没更新"。
+    _log(f"[err] {type(e).__name__}: {e}\n{traceback.format_exc()[-1500:]}")
     return JSONResponse(status_code=500,
                         content={"ok": False, "error": str(e),
                                  "trace": traceback.format_exc()[-1500:]})
 
-
-# ---------------------------------------------------------------- 页面
-
-# ---------------------------------------------------------------- 页面（见文件末尾：优先构建产物）
 
 # ---------------------------------------------------------------- 状态
 
@@ -255,6 +264,14 @@ _JOBS: dict[str, dict] = {}
 @app.post("/api/extract/start")
 def extract_start(req: StartReq):
     """启动后台抽取任务，返回 job_id；进度用 SSE 订阅。"""
+    running_ids = [j for j, jb in _JOBS.items() if not jb.get("done")]
+    if running_ids:
+        # 连点「开始抽取」会叠出多个并发任务：一起打云端配额（429），
+        # 且都往同一个 last_extract.json 写，最后写完的那个说了算 —— 结果不可预测。
+        return JSONResponse(status_code=409, content={
+            "ok": False, "job_id": running_ids[0],
+            "error": "已经有一个抽取任务在跑，请先等它结束或点「停止」。",
+            "running_jobs": running_ids})
     # 只保留最近一个已完成任务，避免 _JOBS 无限堆积（刷新接管的兜底数据）
     for jid, j in list(_JOBS.items()):
         if j.get("done"):
@@ -270,6 +287,10 @@ def extract_start(req: StartReq):
                   # 参数快照：记录本批是怎么发起的
                   "req": {"skip_ids": req.skip_ids, "max_chunks": req.max_chunks,
                           "mode": req.mode, "doc_ids": req.doc_ids or []}}
+
+    _log(f"[extract] 启动 {jid}：mode={req.mode} max_chunks={req.max_chunks} "
+         f"workers={req.workers or 2} skip={len(req.skip_ids or [])} "
+         f"doc_ids={len(req.doc_ids or []) or '全部'}")
 
     def work() -> None:
         last: dict = {}
@@ -304,8 +325,14 @@ def extract_start(req: StartReq):
             # 光靠这一条也能把"已抽到哪"补回来（继续抽取的按钮靠它）。
             _publish(jid, {"type": "done", "result": payload,
                            "chunk_ids": list(_JOBS[jid]["done_ids"])})
+            _log(f"[extract] {jid} 完成：{payload.get('picked_chunks')} 块 / "
+                 f"{payload.get('records_count')} 条记录（已落盘）")
         except Exception as e:                     # noqa: BLE001
             _JOBS[jid]["error"] = str(e)
+            _JOBS[jid]["failed_at"] = time.time()
+            _save_last_failure(jid, _JOBS[jid], e, traceback.format_exc()[-1200:])
+            _log(f"[extract] {jid} 失败：{type(e).__name__}: {e}\n"
+                 f"{traceback.format_exc()[-1200:]}")
             _publish(jid, {"type": "error", "error": str(e),
                            "trace": traceback.format_exc()[-1200:]})
         finally:
@@ -402,6 +429,27 @@ def _clear_last_result() -> None:
         pass
 
 
+def _save_last_failure(jid: str, job: dict, e: Exception, trace: str) -> None:
+    """任务失败也要留痕，保留原有结果。
+
+    不然会出现这种局面：新一批悄悄失败 -> 结果文件没更新 -> 重开页面把上一批
+    原样显示出来，用户以为"抽完了"（其实看到的是旧数据）。
+    现在失败会写进同一个文件，重开时界面能明确提示"上一批失败了"。
+    """
+    try:
+        prev = _read_last_result()
+        prev.update({"failed_job_id": jid, "failed_at": job.get("failed_at")
+                     or time.time(), "failed_error": str(e), "failed_trace": trace})
+        cfg.ensure_dir(cfg.path("project.output_dir"))
+        path = _last_result_path()
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(prev, f, ensure_ascii=False)
+        os.replace(tmp, path)
+    except Exception:                              # noqa: BLE001
+        pass
+
+
 def _publish(jid: str, ev: dict) -> None:
     job = _JOBS.get(jid)
     if job is not None:
@@ -471,9 +519,10 @@ def _restore_last_result(now: float | None = None) -> dict:
         return {}
     _RESTORED_DONE = True
     disk = _read_last_result()
-    if not (disk and disk.get("result")):
+    # 没有结果、也没有失败记录 -> 没什么可恢复的
+    if not (disk.get("result") or disk.get("failed_error")):
         return {}
-    finished = float(disk.get("finished_at") or 0.0)
+    finished = float(disk.get("finished_at") or disk.get("failed_at") or 0.0)
     # 隔了太久（默认超过 24 小时）就不还原了：那时多半已经换了一批文献，
     # 把上周的结果摆出来反而误导。已抽到哪仍由浏览器 localStorage 兜住。
     now = time.time() if now is None else now
@@ -491,6 +540,9 @@ def _restore_last_result(now: float | None = None) -> dict:
             "started_at": disk.get("started_at", finished),
             "progress": {}, "done_ids": list(disk.get("done_ids") or []),
             "result": disk.get("result"), "result_expired": False,
+            "result_saved_at": finished,
+            "last_failed_at": disk.get("failed_at"),
+            "last_failed_error": disk.get("failed_error"),
             "req": dict(disk.get("req") or {})}
 
 
@@ -528,6 +580,9 @@ def _running_job(now: float | None = None) -> dict:
                 "done_ids": list(j.get("done_ids") or []),
                 "result": j.get("result") if fresh else None,
                 "result_expired": not fresh,
+                "result_saved_at": finished,
+                "last_failed_at": j.get("failed_at"),
+                "last_failed_error": j.get("error"),
                 "req": dict(j.get("req") or {})}
     return {}
 

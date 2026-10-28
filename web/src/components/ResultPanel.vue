@@ -5,7 +5,15 @@ import { api } from '../api'
 const props = defineProps({
   result: { type: Object, default: null },
   running: { type: Boolean, default: false },
+  savedAt: { type: Number, default: null },   // 这批结果是什么时候抽的
   schemaText: { type: String, default: '' },
+})
+// 显示批次时间：不然"保留的数据"新旧难辨，用户分不清看到的是不是刚抽的那一批
+const savedText = computed(() => {
+  if (!props.savedAt) return ''
+  const d = new Date(props.savedAt * 1000)
+  const p2 = (n) => String(n).padStart(2, '0')
+  return `${p2(d.getMonth() + 1)}-${p2(d.getDate())} ${p2(d.getHours())}:${p2(d.getMinutes())}`
 })
 const view = ref('table')
 const openRec = ref('')
@@ -120,6 +128,11 @@ const toggle = (id) => { openRec.value = openRec.value === id ? '' : id }
            :class="expanded ? 'fixed left-3 right-3 bottom-3 top-[64px] z-30 shadow-2xl' : ''">
     <header class="panel-head">
       <span class="panel-title">抽取结果</span>
+      <span v-if="result && savedText" class="ml-1 shrink-0 text-[10.5px]"
+            :style="{ color: 'var(--muted)' }"
+            :title="'这批结果产生于 ' + savedText + '，与当前时间对比即可判断是否最新'">
+        {{ savedText }} · {{ (result.records || []).length }} 条
+      </span>
       <div v-if="result" class="flex items-center gap-1">
         <button class="btn btn-ghost h-[24px] px-2 text-[11.5px]"
                 :style="view === 'table' ? { color: 'var(--accent)', fontWeight: 600 } : {}"

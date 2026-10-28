@@ -1285,6 +1285,115 @@ def t_excel_write_mapping() -> None:
     shutil.rmtree(tmpdir, ignore_errors=True)
 
 
+# ------------------------------- 22. 后台任务：失败要可见、不能叠任务
+
+def t_job_visibility() -> None:
+    """任务悄悄失败 -> 结果不更新 -> 重开仍显示旧数据，是最难查的一类问题。"""
+    print("\n[22] 后台任务的失败可见性与并发互斥")
+    import io
+    import threading
+    from contextlib import redirect_stdout
+
+    from rag.web import app as webapp
+
+    tmpdir = tempfile.mkdtemp(prefix="ragtest_job_")
+    path = os.path.join(tmpdir, "last_extract.json")
+    orig_path, orig_jobs = webapp._last_result_path, dict(webapp._JOBS)
+    orig_done = webapp._RESTORED_DONE
+    try:
+        webapp._last_result_path = lambda: path
+        webapp._JOBS.clear()
+
+        # ---- 并发互斥：连点「开始抽取」不该叠出多个任务 ----
+        req = webapp.StartReq(schema_text=None, mode="table", max_chunks=5,
+                              skip_ids=[], doc_ids=[])
+        webapp._JOBS["busy"] = {"events": [], "cv": threading.Condition(),
+                                "done": False, "result": None, "error": None,
+                                "started_at": time.time(), "last": {},
+                                "done_ids": [], "req": {}}
+        resp = webapp.extract_start(req)
+        check("已有任务在跑时不许再开一个",
+              isinstance(resp, webapp.JSONResponse) and resp.status_code == 409,
+              str(getattr(resp, "status_code", resp)))
+        webapp._JOBS.pop("busy", None)
+
+        # ---- 失败落盘：保留旧结果 + 记下失败原因 ----
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump({"job_id": "old", "finished_at": 1000.0,
+                       "done_ids": ["c1"],
+                       "result": {"headers": ["Si"], "rows": [{"Si": 0.6}],
+                                  "records": [{}], "records_count": 1,
+                                  "picked_chunks": 1}}, f)
+        job = {"failed_at": 2000.0, "req": {"skip_ids": []}, "done_ids": []}
+        webapp._save_last_failure("new", job, RuntimeError("云端 429 限流"), "traceback...")
+        disk = webapp._read_last_result()
+        check("失败要写进结果文件（不能只留在内存里）",
+              disk.get("failed_error") == "云端 429 限流"
+              and disk.get("failed_job_id") == "new")
+        check("失败不破坏已有的结果",
+              (disk.get("result") or {}).get("records_count") == 1)
+
+        webapp._JOBS.clear()
+        webapp._RESTORED_DONE = False
+        got = webapp._running_job(now=2100.0)
+        check("重开页面要知道上一批失败过",
+              bool(got.get("last_failed_error")) and got.get("last_failed_at") == 2000.0,
+              str(got.get("last_failed_error")))
+        check("同时仍把旧结果还回来（用户知道自己看的是哪一批）",
+              (got.get("result") or {}).get("records_count") == 1
+              and got.get("result_saved_at") == 1000.0)
+
+        # ---- 异常不再被吞掉：_err 必须写日志 ----
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            webapp._err(ValueError("boom"))
+        check("异常写进运行日志（静默启动时 web.log 是唯一线索）",
+              "[err]" in buf.getvalue() and "boom" in buf.getvalue(),
+              buf.getvalue()[:60])
+    finally:
+        webapp._last_result_path = orig_path
+        webapp._JOBS.clear()
+        webapp._JOBS.update(orig_jobs)
+        webapp._RESTORED_DONE = orig_done
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+    # ---- 云端限流 429 必须能重试回来（流式是抽取主路径）----
+    import contextlib
+    import urllib.error
+    from rag.llm import client as llmc
+
+    calls = {"n": 0}
+    ok_lines = [b'data: {"choices":[{"delta":{"content":"OK"}}]}\n\n', b"data: [DONE]\n\n"]
+
+    class FakeStream(contextlib.AbstractContextManager):
+        def __enter__(self):
+            return iter(ok_lines)
+
+        def __exit__(self, *a):
+            return False
+
+    class FakeOpener:
+        def open(self, req, timeout=None):
+            calls["n"] += 1
+            if calls["n"] <= 2:
+                raise urllib.error.HTTPError(req.full_url, 429, "Too Many Requests",
+                                             {}, None)
+            return FakeStream()
+
+    orig_opener, orig_sleep = llmc.opener_for, llmc.time.sleep
+    llmc.opener_for = lambda url: FakeOpener()
+    llmc.time.sleep = lambda s: None              # 测试里不真等退避
+    try:
+        c = llmc.LLMClient({"llm": {
+            "base_url": "https://example.invalid/v1", "api_key": "x", "model": "m",
+            "gen": {"retries": 2, "timeout_s": 10, "stream": True}}})
+        got = c._stream_post("/chat/completions", {})
+        check("流式遇到 429 会退避重试（不再一次限流就整块失败）",
+              got == "OK" and calls["n"] == 3, f"{got!r} / 尝试 {calls['n']} 次")
+    finally:
+        llmc.opener_for, llmc.time.sleep = orig_opener, orig_sleep
+
+
 def main() -> int:
     tmp = tempfile.mkdtemp(prefix="ragtest_")
     try:
@@ -1309,6 +1418,7 @@ def main() -> int:
         t_sanity_range()
         t_result_persist()
         t_excel_write_mapping()
+        t_job_visibility()
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 

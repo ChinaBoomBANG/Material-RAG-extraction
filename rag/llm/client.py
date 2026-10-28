@@ -113,15 +113,22 @@ class LLMClient:
                 except Exception:
                     pass
                 last_err = LLMError(f"HTTP {e.code} {e.reason} | {body}")
+                if e.code == 429:
+                    # 云端配额限流是可恢复的：等更久再试。原来按"4xx 不重试"直接放弃，
+                    # 结果一次限流就把整批抽抽取打成失败（界面只显示旧数据）。
+                    time.sleep(5 * (attempt + 1))
+                    continue
                 if e.code < 500:
                     break
             except Exception as e:  # 连接失败、超时
                 last_err = e
             time.sleep(1.5 * (attempt + 1))
-        raise LLMError(
-            f"调用 {url} 失败：{last_err}\n"
-            f"请确认 LM Studio 已启动并开启本地服务（默认 http://127.0.0.1:1234）。"
-        )
+        hint = ("云端返回 429：并发超过配额了，把 extract.workers 调小再试。\n"
+                if last_err and "429" in str(last_err) else
+                "请确认 LM Studio 已启动并开启本地服务（默认 http://127.0.0.1:1234）。"
+                if "127.0.0.1" in url or "localhost" in url else
+                "请确认云端 API 地址、密钥与模型名是否正确。")
+        raise LLMError(f"调用 {url} 失败：{last_err}\n{hint}")
 
     # ---------------------------------------------------------- 模型发现
 
@@ -179,13 +186,28 @@ class LLMClient:
         url = self._url(path)
         data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         t = timeout or int(self.gen.get("timeout_s", 600))
-        req = urllib.request.Request(url, data=data, headers=self._headers(), method="POST")
 
+        max_try = int(self.gen.get("retries", 2)) + 1
+        # 限流(429)与临时网络错误要整体重试：流式是抽取的主路径，
+        # 一次 429 就把整块判失败，几十块下来整批就废了。
+        for attempt in range(max_try):
+            # 每次重试都重建 Request：响应体可能已被上一次尝试消费
+            req = urllib.request.Request(url, data=data,
+                                         headers=self._headers(), method="POST")
+            text = self._stream_once(req, url, t)
+            if text is not None:
+                return text
+            if attempt < max_try - 1:
+                time.sleep(5 * (attempt + 1))
+        raise LLMError(f"流式请求失败（{url}）：超过重试次数 {max_try}")
+
+    def _stream_once(self, req, url: str, timeout_s: int) -> str | None:
+        """读一次流式响应。返回 None 表示"可重试的失败"（限流/临时网络错误）。"""
         parts: list[str] = []
         reasoning_len = 0
         raw_lines: list[str] = []
         try:
-            with opener_for(url).open(req, timeout=t) as r:
+            with opener_for(url).open(req, timeout=timeout_s) as r:
                 for raw in r:
                     line = raw.decode("utf-8", "ignore").strip()
                     if not line:
@@ -215,9 +237,11 @@ class LLMClient:
                 body = e.read().decode("utf-8", "ignore")[:400]
             except Exception:
                 pass
+            if e.code == 429:                      # 限流：等一会儿再来，可以重试
+                return None
             raise LLMError(f"HTTP {e.code}：{body}") from e
-        except urllib.error.URLError as e:
-            raise LLMError(f"流式请求失败（{url}）：{e}") from e
+        except urllib.error.URLError as e:         # 连接中断/超时：可以重试
+            return None
 
         text = "".join(parts)
         if text:
