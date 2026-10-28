@@ -182,6 +182,33 @@ class ExtractReq(BaseModel):
     workers: int | None = None         # 并发数；不填 = config.extract.workers
 
 
+def _save_rounds_log(rounds: dict) -> dict:
+    """把逐字段变更日志落成 CSV（会很长，不塞进前端 payload）。"""
+    log = rounds.get("log") or []
+    out = {k: v for k, v in rounds.items() if k != "log"}
+    out["log_count"] = len(log)
+    out["log_head"] = log[:20]
+    if not log:
+        return out
+    try:
+        import csv
+        d = cfg.load()["project"]["output_dir"]
+        if not os.path.isabs(d):
+            d = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
+                os.path.abspath(__file__)))), d)
+        os.makedirs(d, exist_ok=True)
+        p = os.path.join(d, f"rounds_log_{time.strftime('%Y%m%d_%H%M%S')}.csv")
+        with open(p, "w", encoding="utf-8-sig", newline="") as f:
+            w = csv.DictWriter(f, fieldnames=list(log[0].keys()))
+            w.writeheader()
+            for r in log:
+                w.writerow(r)
+        out["log_csv"] = p
+    except Exception as e:                                  # noqa: BLE001
+        out["log_csv_error"] = f"{type(e).__name__}: {e}"
+    return out
+
+
 def _extract_payload(res: dict, excel_path: str | None) -> dict:
     """把管线结果整理成前端要的形状（供 SSE 任务与导出复用）。"""
     recs = res["records"]
@@ -209,6 +236,8 @@ def _extract_payload(res: dict, excel_path: str | None) -> dict:
         "schema_groups": ([g.to_dict() for g in sdef.groups] if sdef else []),
         "dropped": res.get("dropped", []),
         "process_card": res.get("process_card"),
+        "rounds": (_save_rounds_log(res["rounds"]) if isinstance(res.get("rounds"), dict)
+                   else res.get("rounds")),
         "headers": headers,
         "rows": rows,
         "row_ids": [r.record_id for r in recs],

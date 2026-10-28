@@ -28,6 +28,24 @@ const cardTitle = computed(() => {
     + `（按牌号命中 ${c.per_alloy ?? 0} 条 / 整篇共用 ${c.paper_level ?? 0} 条 /`
     + ` 对不上留空 ${c.unmatched ?? 0} 条）`
 })
+// 多轮定向补全：跑了几个轮、补了多少格、有没有收敛
+const rounds = computed(() => props.result?.rounds || null)
+const roundsText = computed(() => {
+  const r = rounds.value
+  if (!r || r.error || (!r.added && !r.corrected)) return ''
+  return `多轮补全 +${r.added}${r.corrected ? ` / 修正 ${r.corrected}` : ''}`
+})
+const roundsTitle = computed(() => {
+  const r = rounds.value || {}
+  const before = r.fill_before?.overall
+  const after = r.fill_after?.overall
+  return `多轮定向补全：跑了 ${r.rounds_run ?? 0} 轮（上限 ${r.max_rounds ?? 0}，`
+    + `${r.converged ? '已收敛' : '未收敛'}），调用 ${r.calls ?? 0} 次；`
+    + `填充率 ${before != null ? (before * 100).toFixed(1) : '—'}% -> `
+    + `${after != null ? (after * 100).toFixed(1) : '—'}%；`
+    + `未过证据校验 ${r.skipped ?? 0} 格、与原值冲突未覆盖 ${r.conflict ?? 0} 格`
+    + (r.log_csv ? `；明细：${r.log_csv}` : '')
+})
 const view = ref('table')
 const openRec = ref('')
 const showDropped = ref(false)
@@ -164,6 +182,8 @@ const toggle = (id) => { openRec.value = openRec.value === id ? '' : id }
       </span>
       <span v-if="cardText" class="ml-1 shrink-0 text-[10.5px]"
             :style="{ color: 'var(--muted)' }" :title="cardTitle">{{ cardText }}</span>
+      <span v-if="roundsText" class="ml-1 shrink-0 text-[10.5px]"
+            :style="{ color: 'var(--muted)' }" :title="roundsTitle">{{ roundsText }}</span>
       <div v-if="result" class="flex items-center gap-1">
         <button class="btn btn-ghost h-[24px] px-2 text-[11.5px]"
                 :style="view === 'table' ? { color: 'var(--accent)', fontWeight: 600 } : {}"

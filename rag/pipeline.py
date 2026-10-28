@@ -296,10 +296,24 @@ class RagPipeline:
                                                  specs, self.conf, on_event=on_event)
             except Exception as e:          # 卡片只是增强，失败不能把整批抽取带崩
                 card_stats = {"error": f"{type(e).__name__}: {e}"}
+
+        # 多轮定向补全：只对缺字段的记录、只问缺的字段、按牌号检索相关块；
+        # 一轮内没有 added/corrected 就停（默认上限 3 轮）。
+        rounds_stats = None
+        rounds_conf = self.conf.get("extract", {}).get("rounds", {}) or {}
+        if rounds_conf.get("enabled", True) and records:
+            from .extract.rounds import run_rounds
+            try:
+                rounds_stats = run_rounds(self.llm, self.store, records, specs,
+                                          self.conf, on_event=on_event,
+                                          should_stop=should_stop)
+            except Exception as e:          # 补全失败不影响已抽到的数据
+                rounds_stats = {"error": f"{type(e).__name__}: {e}"}
         return {"records": records, "specs": specs, "schema": matched_info,
                 "schema_def": schema_def, "picked_chunks": len(chunks),
                 "records_count": len(records), "workers": max(1, int(workers)),
                 "process_card": card_stats,
+                "rounds": rounds_stats,
                 # 用抽取器记录的真实状态：不能在这里再调 should_stop()——
                 # 用户点过停止后 cancel 标记会一直为 True，会把没被中断的任务误报成「提前停止」
                 "stopped_early": bool(self.extractor.stopped_early),

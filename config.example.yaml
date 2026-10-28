@@ -148,6 +148,16 @@ extract:
     enabled: true
     max_chars: 12000              # 送去建卡的正文上限（优先含固溶/时效/淬火的段落）
     cache: true                   # 按 (文献, 模型) 缓存到 data/index/process_cards.json
+  # 多轮定向补全：只对缺字段的记录、只问缺的字段、按牌号检索相关块。
+  # 规则：空则填（added）；原值无逐字证据、新值有 -> 可换（corrected）；
+  #       两边都有证据却不同 -> 不覆盖（conflict），因为通常是不同工艺条件。
+  # 一轮内没有 added/corrected 即停（收敛）。
+  rounds:
+    enabled: true
+    max_rounds: 3                 # 轮数上限；收敛会自动提前停
+    only_missing: true            # true = 只问缺的字段（推荐）；false = 全部字段重问
+    top_k_chunks: 6               # 每轮给该条记录检索多少个片段
+    max_calls_total: 400          # 本次抽取的补全调用总上限，防止跑飞
   # 结构化输出（云端 API 支持时）会减少"输出带解释文字"导致的 JSON 解析失败；
   # 本地服务不支持会自动去掉该参数重试，不影响兼容性。
   json_object_mode: true

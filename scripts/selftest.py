@@ -1623,6 +1623,92 @@ def t_process_card() -> None:
           calls["n"] == 1, f"调用 {calls['n']} 次")
 
 
+# ------------------------------- 25. 多轮定向补全（补、修正、冲突、收敛）
+
+def t_rounds() -> None:
+    """多轮补全的规则比"多问几遍"重要：错一条就会覆盖掉真实数据。"""
+    print("\n[25] 多轮定向补全（规则 + 收敛判停）")
+    from rag.extract.rounds import (fill_rate, merge_round, missing_fields,
+                                    run_rounds)
+    from rag.models import Evidence, FieldValue, MaterialRecord
+
+    specs = build_schema_from_headers(
+        ["合金牌号", "Si", "固溶温度", "时效温度", "时效时间"])["specs"]
+    rec = MaterialRecord(alloy="6061", source_doc="p.pdf")
+    rec.composition["Si"] = FieldValue(
+        value=0.62, unit="wt.%", evidence=Evidence(quote="Si 0.62", verified=True))
+
+    miss = missing_fields(rec, specs)
+    check("只把真正缺的字段算作待补", "process.aging_temp" in miss
+          and "composition.Si" not in miss, f"{miss}")
+
+    chunk = Chunk.make("d1", "p.pdf", 1, "text",
+                       "The alloy was aged at 175 C for 8 h.")
+
+    # ---- 规则 1：空则填 ----
+    log: list[dict] = []
+    st = merge_round(rec, {"fields": {"process.aging_temp":
+                                     {"raw": "175", "quote": "aged at 175 C"}}},
+                     specs, [chunk], 1, log)
+    check("缺字段 -> 填上（added）",
+          st["added"] == 1 and float(rec.process["aging_temp"].value) == 175,
+          f"{st} / {rec.process.get('aging_temp')}")
+
+    # ---- 规则 2：引文对不上 -> 不写 ----
+    st = merge_round(rec, {"fields": {"process.aging_time":
+                                     {"raw": "8", "quote": "编造的引文"}}},
+                     specs, [chunk], 1, log)
+    check("引文在原文找不到 -> 丢弃（unverified 可查）",
+          st["skipped"] == 1 and "aging_time" not in rec.process, f"{st}")
+
+    # ---- 规则 3：原值无证据、新值有证据 -> 可修正 ----
+    rec.process["aging_time"] = FieldValue(value="6", unit="h")      # 无 evidence
+    st = merge_round(rec, {"corrections": {"process.aging_time":
+                                          {"raw": "8", "quote": "for 8 h"}}},
+                     specs, [chunk], 2, log)
+    check("原值没有逐字证据、新值有 -> 允许修正（corrected）",
+          st["corrected"] == 1 and float(rec.process["aging_time"].value) == 8,
+          f"{st} / {rec.process['aging_time'].value}")
+
+    # ---- 规则 4：两边都有证据却不同 -> 绝不覆盖 ----
+    rec.process["aging_time"] = FieldValue(
+        value="6", unit="h", evidence=Evidence(quote="for 6 h", verified=True))
+    st = merge_round(rec, {"corrections": {"process.aging_time":
+                                          {"raw": "8", "quote": "for 8 h"}}},
+                     specs, [chunk], 3, log)
+    check("两边都有证据但值不同 -> 不覆盖（记为 conflict，留人工判断）",
+          st["conflict"] == 1 and str(rec.process["aging_time"].value) == "6"
+          and any("第 3 轮发现与已有值不同" in w for w in rec.warnings),
+          f"{st} / {rec.process['aging_time'].value}")
+
+    # ---- 收敛：给一个永远回答"没找到"的模型，应该在 1 轮后停 ----
+    class EmptyLLM:
+        calls = 0
+
+        def chat_json(self, user, system="", retry_hint="", response_format=None):
+            EmptyLLM.calls += 1
+            return {"fields": {}, "corrections": {}}
+
+    class Store:
+        chunks = [chunk]
+
+    conf = copy.deepcopy(cfg.load())
+    conf["extract"]["rounds"] = {"enabled": True, "max_rounds": 3,
+                                 "only_missing": True, "top_k_chunks": 2,
+                                 "max_calls_total": 10}
+    rec2 = MaterialRecord(alloy="6061", source_doc="p.pdf")
+    out = run_rounds(EmptyLLM(), Store(), [rec2], specs, conf)
+    check("一轮没补出东西就收敛停止（不空跑满 3 轮）",
+          out["converged"] is True and out["rounds_run"] == 1,
+          f"rounds={out['rounds_run']} converged={out['converged']}")
+
+    fr = fill_rate([rec2], specs)
+    check("填充率是逐字段算的（用于报告补全前后）",
+          set(fr["columns"]) == {"composition.Si", "process.solution_temp",
+                                 "process.aging_temp", "process.aging_time"}
+          and fr["overall"] == 0.0, f"{fr}")
+
+
 def main() -> int:
     tmp = tempfile.mkdtemp(prefix="ragtest_")
     try:
@@ -1650,6 +1736,7 @@ def main() -> int:
         t_job_visibility()
         t_quantity_guard()
         t_process_card()
+        t_rounds()
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
