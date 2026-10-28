@@ -1516,6 +1516,22 @@ def t_quantity_guard() -> None:
     check("没有单位时不误报（原文常不写单位）",
           quantity_issue("aging_temp", 175, "aged at 175") == "")
 
+    # 延伸率：% 与时间最容易串（"12 h" 被当成 12%）
+    check("延伸率 12% 合法", quantity_issue("elongation", 12, "elongation of 12%") == "")
+    check("延伸率 120% 判越界", "物理范围" in quantity_issue("elongation", 120, "120%"))
+    check("引文是 12 h 却当延伸率 -> 拒（时间单位）",
+          "单位" in quantity_issue("elongation", 12, "aged for 12 h"))
+
+    # 表头写法：伸长率 / El / Elongation(%) 都要认，且不能被拆成元素 Ti
+    from rag.extract.schema import match_header
+    for h, want in (("伸长率", "properties.elongation"),
+                    ("El", "properties.elongation"),
+                    ("El (%)", "properties.elongation"),
+                    ("Elongation (%)", "properties.elongation"),
+                    ("Ti", "composition.Ti")):
+        got = getattr(match_header(h), "key", None)
+        check(f"表头 {h} -> {want}", got == want, f"实得 {got}")
+
     # 端到端：假模型给出 时效温度=1（引文 "1 h"），该字段必须被删、成分保留
     text = "The alloy was aged for 1 h and the Si content was 0.62 wt.%."
     chunk = Chunk.make("doc9", "q.pdf", 1, "text", text)

@@ -287,6 +287,7 @@ _UNIT_PATTERNS = {
     "temp": r"°\s*c|℃|\bdegc\b|\bkelvin\b",
     "time": (r"\b(?:h|hr|hrs|hour|hours|min|mins|minute|minutes|"
              r"s|sec|secs|second|seconds|day|days)\b|小时|分钟|秒|天"),
+    "pct": r"\s*[%％]|\bpct\b|\bpercent\b",
 }
 
 
@@ -355,6 +356,8 @@ def _modal_kind(kind: str) -> str:
         return "temp"
     if kind.endswith("time") or kind == "time":
         return "time"
+    if kind in ("elongation", "pct", "percentage"):
+        return "pct"
     return ""
 
 

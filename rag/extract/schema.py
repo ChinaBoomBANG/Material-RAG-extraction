@@ -148,7 +148,8 @@ FIELD_DICT += [
     _f("properties.UTS", "抗拉强度 Rm", "properties", "MPa", "number",
        ["抗拉强度", "tensile strength", "UTS", "Rm", "σb"]),
     _f("properties.elongation", "延伸率 A", "properties", "%", "number",
-       ["延伸率", "elongation", "断后伸长率", "δ", "A50mm"]),
+       ["延伸率", "伸长率", "elongation", "断后伸长率", "断裂延伸率",
+        "El", "δ", "A50mm"]),
     _f("properties.hardness_HV", "硬度 HV", "properties", "HV", "number",
        ["维氏硬度", "hardness", "HV", "Vickers", "显微硬度"]),
     _f("properties.hardness_HB", "硬度 HB", "properties", "HB", "number",
@@ -224,16 +225,31 @@ def match_header(header: str) -> FieldSpec | None:
     if n in _ALIAS_INDEX:
         return BY_KEY[_ALIAS_INDEX[n]]
     # 成分列的常见写法：Si(wt.%) / Si 含量 / w(Si)
-    m = re.search(r"^(?:w\()?([a-z]{1,3})(?:\))?(?:含量|wt|mas|质量分数)?", n)
+    # 关键：元素符号后面只允许跟单位类尾巴，否则 "elongation%" 会被切成 "el"，
+    # 而 "elongation" 里的 "ti" 又会被子串兜底当成 Ti —— 数据就串列了。
+    cand = n
+    if cand.startswith("w("):
+        cand = cand[2:]
+    elif cand.startswith("w") and len(cand) > 2:
+        cand = cand[1:]
+    cand = cand.replace(")", "")
+    m = re.match(r"^([a-z]{1,2})", cand)
     if m:
         sym = m.group(1).capitalize()
+        rest = cand[m.end():]
         key = f"composition.{sym}"
-        if key in BY_KEY:
+        if key in BY_KEY and re.fullmatch(
+                r"(?:含量|质量分数|wt|mas|at|ppm|%|\.)*", rest):
             return BY_KEY[key]
-    # 子串包含：表头更长时兜底
+    # 子串包含：表头更长时兜底。
+    # 元素符号（Si/Mg/Ti…）不参与子串兜底：实测 "Elongation (%)" 的
+    # "elonga-TI-on" 会被当成 Ti 列，数据就写到钛那一列去了。
     for alias, key in _ALIAS_INDEX.items():
-        if len(alias) >= 2 and alias in n:
-            return BY_KEY[key]
+        if len(alias) < 2 or alias not in n:
+            continue
+        if key.startswith("composition.") and len(alias) <= 2:
+            continue
+        return BY_KEY[key]
     return None
 
 
