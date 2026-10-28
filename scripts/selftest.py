@@ -1272,8 +1272,34 @@ def t_excel_write_mapping() -> None:
     check("空表（无表头）-> 自动建表头再写数据",
           grid[0][:3] == ("合金牌号", "Si", "Mg"), str(grid[0]))
 
+    # 追加语义：从已有数据下面接着写；同批再点一次要看得见（只提示，不替用户删）
+    p = os.path.join(tmpdir, "append.xlsx")
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "data"
+    ws.append(["合金牌号", "Si"])
+    ws.append(["6013", 0.60])
+    wb.save(p)
+    wb.close()
+
+    def export_again():
+        res = export_data(ExportReq(records=[rec.to_dict()], schema_text=sd_yaml,
+                                    format="xlsx", excel_path=p, clean={}))
+        body = res if isinstance(res, dict) else json.loads(res.body.decode())
+        grid = [tuple(r) for r in openpyxl.load_workbook(p).active.iter_rows(values_only=True)]
+        return body, grid
+
+    b1, g1 = export_again()
+    b2, g2 = export_again()
+    check("新数据接在已有数据下面（不是覆盖第一行）",
+          g2[0] == ("合金牌号", "Si") and g2[1] == ("6013", 0.6)
+          and g2[2][0] == "6013" and g2[3][0] == "6013", str(g2))
+    check("重复导出同批 -> 只提示、不擅自删行",
+          int(b1.get("duplicate_of_existing") or 0) == 0
+          and int(b2.get("duplicate_of_existing") or 0) == 1
+          and len(g2) == 4, f"{b1.get('duplicate_of_existing')}/{b2.get('duplicate_of_existing')}")
+
     # 纯函数层：模板列 -> 目标列名
-    specs = {"alloy": None}
     from rag.extract.schema import BY_KEY
     sps = {"alloy": BY_KEY["alloy"], "composition.Si": BY_KEY["composition.Si"]}
     mapped, mapping, skipped = _map_rows_to_headers(

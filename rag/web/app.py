@@ -846,6 +846,40 @@ def _write_new_xlsx(path: str, headers: list[str], rows: list[dict]) -> dict:
             "unexpected_count": 0}
 
 
+def _count_duplicate_rows(path: str, sheet: str, headers: list[str],
+                          rows: list[dict]) -> int | None:
+    """新行里有多少行与表里已有的行完全相同（用于提示，不会据此删行）。
+
+    只按"本批要写入的那几列"比对，且要求整行逐个值相同 —— 这样才是
+    "重复点了一次导出"这种明确情况，不涉及任何模糊判定。
+    读不出来就返回 None（宁可不报，也不报错数字）。
+    """
+    try:
+        import openpyxl
+        idx = [i for i, h in enumerate(headers) if (h or "").strip()]
+        if not idx:
+            return None
+        wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
+        try:
+            ws = wb[sheet] if sheet in wb.sheetnames else wb[wb.sheetnames[0]]
+            seen: set[tuple] = set()
+            for n, row in enumerate(ws.iter_rows(values_only=True)):
+                if n == 0:                                  # 跳过表头
+                    continue
+                if not any(v is not None and str(v).strip() != "" for v in row):
+                    continue                                # 空行不算
+                seen.add(tuple(row[i] if i < len(row) else None for i in idx))
+        finally:
+            wb.close()
+        n_dup = 0
+        for r in rows:
+            if tuple(r.get(headers[i]) for i in idx) in seen:
+                n_dup += 1
+        return n_dup
+    except Exception:                                       # noqa: BLE001
+        return None
+
+
 def _map_rows_to_headers(rows: list[dict], specs: dict,
                          headers: list[str]) -> tuple[list[dict], list[str], list[str]]:
     """把「模板列名」行改写为「目标表真实列名」行。
@@ -1025,6 +1059,11 @@ def export_data(req: ExportReq):
                 "hint": "把目标表首行改成模板里的列名（如 合金牌号 / Si / Mg），"
                         "或换一个本来就有这些表头的表。"})
 
+        # 追加是"叠在最后一行下面"，不去重表里已有的内容。
+        # 但重复点一次导出就会多写一批完全一样的行，所以这里**如实报告**
+        # 有多少行与表里已有行完全相同（仍然写入，绝不擅自替用户删）。
+        dup_of_existing = _count_duplicate_rows(target, tgt.sheet,
+                                                target_headers, mapped_rows)
         wres = tgt.write(mapped_rows, dry_run=False)
         written = int(wres.get("written_cells") or 0)
         return {"ok": written > 0, "format": "xlsx", "write": wres,
@@ -1033,6 +1072,7 @@ def export_data(req: ExportReq):
                 "deduped": deduped,
                 "written_cells": written,
                 "column_mapping": mapping, "skipped_columns": skipped,
+                "duplicate_of_existing": dup_of_existing,
                 "balance_added": balance_added,
                 "clean_report": report, "schema": sdef.to_dict()}
     except Exception as e:

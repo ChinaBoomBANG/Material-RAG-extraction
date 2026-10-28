@@ -104,8 +104,10 @@ async function doExport() {
           + (r.skipped_columns?.length ? `对不上的列：${r.skipped_columns.join('、')}\n` : '')
           + '请核对目标表首行的列名'
       } else {
+        const dup = r.duplicate_of_existing
         expMsg.value = `已写入 ${w.target || expPath.value}：${r.rows} 行 / ${cells} 个单元格`
-          + (w.created ? '\n新建文件' : `\n非预期变更 ${w.unexpected_count ?? '—'} 处`)
+          + (w.created ? '\n新建文件（表头+数据）' : `\n追加在原有数据下面；非预期变更 ${w.unexpected_count ?? '—'} 处`)
+          + (dup ? `\n注意：其中 ${dup} 行与表里已有行完全相同（仍然写入了，可能点过两次）` : '')
           + (r.skipped_columns?.length ? `\n跳过（表里没有对应列）：${r.skipped_columns.join('、')}` : '')
           + (r.column_mapping?.length ? `\n列名对齐：${r.column_mapping.join('；')}` : '')
           + `\n${cleanSummary(r.clean_report)}`
