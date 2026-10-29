@@ -1856,7 +1856,17 @@ def t_header_traps() -> None:
     check("Hardness (HV) -> HV",
           getattr(S.match_header("Hardness (HV)"), "key", None) == "properties.hardness_HV")
 
-    # 3) 单位尾巴不许吃掉名字本身的字母：uts(mpa) 不能变成 ut
+    # 3) 量纲门：表头单位与字段单位不同类 -> 不认（这条挡掉大部分"像但不是"）
+    check("Elongation (MPa) -> 不认（% 与 MPa 不同类）",
+          S.match_header("Elongation (MPa)") is None,
+          str(getattr(S.match_header("Elongation (MPa)"), "key", None)))
+    check("UTS (%) -> 不认（MPa 与 % 不同类）",
+          S.match_header("UTS (%)") is None)
+    check("抗拉强度 Rm -> 仍是抗拉强度（结尾 m 不被当成米）",
+          getattr(S.match_header("抗拉强度 Rm"), "key", None) == "properties.UTS",
+          str(getattr(S.match_header("抗拉强度 Rm"), "key", None)))
+
+    # 4) 单位尾巴不许吃掉名字本身的字母：uts(mpa) 不能变成 ut
     check("UTS (MPa) 剥单位后仍命中 UTS（不是 UT）",
           S._strip_unit_tail(S._norm("UTS (MPa)")) == "uts",
           S._strip_unit_tail(S._norm("UTS (MPa)")))

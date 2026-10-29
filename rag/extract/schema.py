@@ -237,8 +237,68 @@ for _spec in FIELD_DICT:
         _ALIAS_INDEX.setdefault(_norm(_a), _spec.key)
 
 
+# ------------------------------------------------ 量纲门：单位对不上就不认这一列
+
+_UNIT_DIM = {
+    "°c": "temp", "℃": "temp", "k": "temp", "degc": "temp",
+    "mpa": "stress", "gpa": "stress", "pa": "stress", "n/mm2": "stress", "kg/mm2": "stress",
+    "h": "time", "min": "time", "sec": "time", "s": "time", "hour": "time", "day": "time",
+    "%": "ratio", "pct": "ratio", "percent": "ratio",
+    "%iacs": "cond", "iacs": "cond", "ms/m": "cond", "sm/mm2": "cond",
+    "hv": "hardness", "hb": "hardness", "hbw": "hardness", "hrc": "hardness", "hrb": "hardness",
+    "wt.%": "massfrac", "wt%": "massfrac", "at.%": "atfrac", "at%": "atfrac", "ppm": "massfrac",
+    "mm": "length", "cm": "length", "um": "length", "μm": "length", "nm": "length", "m": "length",
+    "j": "energy", "kj": "energy", "mpa√m": "toughness",
+}
+
+
+def _unit_dim(unit: str) -> str:
+    """把单位字符串归一成量纲类别；认不出返回空串（不参与判断）。"""
+    u = "".join((unit or "").lower().split())
+    if not u:
+        return ""
+    return _UNIT_DIM.get(u, "")
+
+
+def _header_unit_dim(header: str) -> str:
+    """从表头里取单位，返回量纲类别。
+
+    只看**括号里**或**空格后面**的写法，绝不从结尾字母硬猜：
+    否则 "抗拉强度 Rm" 结尾的 "m"（米）会被当成单位，整列被误拒。
+    """
+    h = (header or "").strip()
+    m = re.search(r"[\(\（]\s*([^()（）]{1,12}?)\s*[\)\）]\s*$", h)
+    if m:
+        return _unit_dim(m.group(1))
+    m = re.search(r"\s([A-Za-z%°℃/]{1,10})\s*$", h)
+    if m:
+        return _unit_dim(m.group(1))
+    return ""
+
+
+def _dim_ok(header: str, spec) -> bool:
+    """表头带的单位与字段声明的单位必须同类。
+
+    这一条能挡住绝大多数"字符串像但其实不是"的错配：`Elongation (%)` 是 ratio，
+    而抗拉强度要求 stress —— 单位对不上就不认，直接当自定义列。
+    两边只要有一边没有单位，就不做判断（原文常常不写单位）。
+    """
+    hu, su = _header_unit_dim(header), _unit_dim(getattr(spec, "unit", "") or "")
+    if not hu or not su:
+        return True
+    return hu == su
+
+
 def match_header(header: str) -> FieldSpec | None:
     """把 Excel 表头匹配到标准字段。匹配不到返回 None（按自定义列处理）。"""
+    spec = _match_header_raw(header)
+    n = _norm(header)
+    if spec is not None and not _dim_ok(header, spec):
+        return None                      # 单位量纲不符：宁可认不出，也不能认错
+    return spec
+
+
+def _match_header_raw(header: str) -> FieldSpec | None:
     n = _norm(header)
     if not n:
         return None
@@ -271,7 +331,10 @@ def match_header(header: str) -> FieldSpec | None:
     # "Analysis" 命中 ys → 屈服强度；"Brinell hardness" 命中 el → 延伸率。
     best = ""
     for alias, key in _ALIAS_INDEX.items():
-        if len(alias) < 4 or alias not in n:
+        # 中文别名 3 字起（"延伸率""固溶温度"这类不会被英文单词吞掉），
+        # 英文别名必须 4 字母起（rm / ys / el / hv 太短，会命中单词内部）。
+        need = 3 if any("\u4e00" <= ch <= "\u9fff" for ch in alias) else 4
+        if len(alias) < need or alias not in n:
             continue
         if len(alias) > len(best):             # 最长匹配优先
             best = alias
