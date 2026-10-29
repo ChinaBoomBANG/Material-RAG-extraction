@@ -1872,6 +1872,38 @@ def t_header_traps() -> None:
           S._strip_unit_tail(S._norm("UTS (MPa)")))
 
 
+# ------------------------------- 28. 表头认不出时，按数值形状反推字段
+
+def t_shape_infer() -> None:
+    """老文献表头常写"塑性指标""力学指标"。文字认不出时，用数值形状兜一层。"""
+    print("\n[28] 数值形状反推字段（表头认不出时的兜底）")
+    from rag.extract.normalize import infer_field_from_values
+    from rag.extract.schema import BY_KEY, build_schema_from_headers
+
+    key = lambda h, vals: infer_field_from_values(vals, BY_KEY, set(), h)
+    check("12.5/14/9.2 配 (%) -> 延伸率",
+          key("ratio", [12.5, 14, 9.2])[0] == "properties.elongation", str(key("ratio", [12.5, 14, 9.2])))
+    check("550/560/540 配 (℃) -> 固溶温度",
+          key("temp", [550, 560, 540])[0] == "process.solution_temp")
+    check("280/310/295 配 (MPa) -> 拒绝（抗拉与屈服分不开）",
+          key("stress", [280, 310, 295])[0] == "", str(key("stress", [280, 310, 295])))
+    check("没有单位就拒绝（12.5 也可能是 12.5 h）",
+          key("", [12.5, 14, 9.2])[0] == "")
+    check("样本少于 3 个不推断",
+          key("ratio", [12.5, 14])[0] == "")
+
+    built = build_schema_from_headers(
+        ["合金牌号", "塑性指标 (%)", "力学指标 (MPa)"],
+        samples={"塑性指标 (%)": [12.5, 14, 9.2], "力学指标 (MPa)": [280, 310, 295]})
+    m = {x["header"]: x for x in built["matched"]}
+    check("表头认不出但能反推的列被认出来，并标注来源",
+          m.get("塑性指标 (%)", {}).get("key") == "properties.elongation"
+          and "推断" in m.get("塑性指标 (%)", {}).get("inferred", ""),
+          str(m.get("塑性指标 (%)")))
+    check("反推不出的一律留作自定义列（不硬猜）",
+          "力学指标 (MPa)" in [c["header"] for c in built["custom"]])
+
+
 def main() -> int:
     tmp = tempfile.mkdtemp(prefix="ragtest_")
     try:
@@ -1902,6 +1934,7 @@ def main() -> int:
         t_rounds()
         t_join_rows()
         t_header_traps()
+        t_shape_infer()
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 

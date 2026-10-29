@@ -379,3 +379,97 @@ def _unit_near(quote: str, v: float) -> str:
                     return kind
             i = s.find(token, i + 1)
     return ""
+
+
+# ------------------------------------------------ 用一列数值的形状反推它是什么字段
+
+# 「常见取值区间」而不是「物理极限」：区分字段靠的是典型范围。
+# 例如 12.5 / 14 / 9.2 既在 0~100（延伸率）也在 0~3000（强度）区间里，
+# 但强度的典型值是 80~1200，于是只有一个候选能过。
+_TYPICAL_RANGES: dict[str, tuple[float, float]] = {
+    "elongation": (1.0, 60.0),
+    "strength": (80.0, 1200.0),
+    "hardness": (30.0, 400.0),
+    "solution_temp": (300.0, 660.0),
+    "aging_temp": (20.0, 320.0),
+    "solution_time": (0.1, 200.0),
+    "aging_time": (0.1, 500.0),
+    "massfrac": (0.001, 15.0),
+}
+
+
+def _typical_range(key: str, spec) -> tuple[float, float] | None:
+    """某个字段"正常数据"的区间；返回 None 表示该字段不参与反推。"""
+    if key.startswith("composition."):
+        elem = key.split(".", 1)[1]
+        if elem in ("Al", "RE"):
+            return None                     # 余量元素与自定义合并列不参与
+        # 只认"合金化元素的常见含量"：真实成分列 95% 的值在 3 wt.% 以内。
+        # 放宽到 15 会让延伸率（5~40）与成分互相冒充，唯一性约束就永远过不了。
+        hi = min(3.0, ELEMENT_MAX_WT.get(elem, 3.0))
+        return (0.005, hi)
+    kind = quantity_kind(getattr(spec, "label", "") or "", key)
+    if kind in _TYPICAL_RANGES:
+        return _TYPICAL_RANGES[kind]
+    return None
+
+
+def infer_field_from_values(values, specs: dict, taken: set[str] | None = None,
+                            header_dim: str = "") -> tuple[str, str]:
+    """表头认不出时，用这一列的数值形状猜它属于哪个字段。
+
+    三条硬约束，缺一不可：
+      1. 至少 3 个数值，且 80% 落在某字段的典型区间内；
+      2. **唯一性**：只能有一个字段满足，两个以上就放弃（强度 vs 屈服强度分不开）；
+      3. 若表头带了单位，单位量纲必须与候选字段一致。
+
+    返回 (字段key, 置信说明)；判不出来返回 ("", "")。绝不猜多解的情况。
+    """
+    if not header_dim:
+        return "", ""          # 没写单位就无从区分（12.5 既是 12.5% 也是 12.5 h）
+    nums: list[float] = []
+    for v in list(values or [])[:40]:
+        m = re.search(r"-?\d+(?:\.\d+)?", str(v if v is not None else ""))
+        if m:
+            try:
+                nums.append(float(m.group()))
+            except ValueError:
+                continue
+    if len(nums) < 3:
+        return "", ""
+    taken = taken or set()
+    hits: list[tuple[str, float]] = []
+    for key, spec in specs.items():
+        if key in taken or (getattr(spec, "kind", "") or "") != "number":
+            continue
+        if key.endswith("_pred"):
+            continue        # 预测值与实测值分布相同，靠形状分不开，一律不参与
+        rng = _typical_range(key, spec)
+        if rng is None:
+            continue
+        lo, hi = rng
+        inside = sum(1 for v in nums if lo <= v <= hi)
+        ratio = inside / len(nums)
+        if ratio < 0.8:
+            continue
+        dim = _shape_dim(key, spec)
+        if dim and dim != header_dim:
+            continue
+        hits.append((key, ratio))
+    if len(hits) != 1:
+        return "", ""
+    key, ratio = hits[0]
+    return key, f"按数值形状推断（{ratio * 100:.0f}% 的值落在该字段典型区间）"
+
+
+def _shape_dim(key: str, spec) -> str:
+    """字段的量纲（用于与表头单位交叉验证）。用字段语义推，不维护第二张表。"""
+    if key.startswith("composition."):
+        return "massfrac"
+    kind = quantity_kind(getattr(spec, "label", "") or "", key)
+    if kind.endswith("temp"):
+        return "temp"
+    if kind.endswith("time"):
+        return "time"
+    return {"strength": "stress", "hardness": "hardness",
+            "elongation": "ratio"}.get(kind, "")

@@ -227,13 +227,16 @@ class RagPipeline:
           3. 都没有 -> 内置模板（原 94 字段）
         """
         self.ensure_models()
+        samples = None
         if headers is None and excel_path:
             from .writeback.excel import ExcelTarget as _X       # 延迟导入：拉起 pandas
-            headers = _X(excel_path, self.conf).headers()
+            _target = _X(excel_path, self.conf)
+            headers = _target.headers()
+            samples = _target.samples()                          # 供数值形状反推使用
 
         schema_def = None
         if headers:
-            built = build_schema_from_headers(headers)
+            built = build_schema_from_headers(headers, samples)
             specs = built["specs"]
             matched_info = {"mode": "excel_headers",
                             "matched": built["matched"], "custom": built["custom"]}

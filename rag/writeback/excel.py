@@ -53,8 +53,25 @@ class ExcelTarget:
         wb.close()
         return [str(v).strip() if v is not None else "" for v in values]
 
+    def samples(self, header_row: int = 1, limit: int = 40) -> dict[str, list]:
+        """取每列前若干个非空值，供「表头认不出时按数值形状反推字段」使用。"""
+        heads = self.headers(header_row)
+        out: dict[str, list] = {h: [] for h in heads if h and h.strip()}
+        wb = openpyxl.load_workbook(self.path, read_only=True)
+        ws = wb[self.sheet]
+        for row in ws.iter_rows(min_row=header_row + 1, values_only=True):
+            for i, h in enumerate(heads):
+                if h in out and len(out[h]) < limit and i < len(row):
+                    v = row[i]
+                    if v is not None and str(v).strip() != "":
+                        out[h].append(v)
+            if all(len(v) >= limit for v in out.values()):
+                break
+        wb.close()
+        return out
+
     def schema(self, header_row: int = 1) -> dict:
-        return build_schema_from_headers(self.headers(header_row))
+        return build_schema_from_headers(self.headers(header_row), self.samples(header_row))
 
     # ---------------------------------------------------------- 记录 -> 行
 

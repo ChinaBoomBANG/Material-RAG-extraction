@@ -197,6 +197,14 @@ ALLOY_SPEC: FieldSpec = BY_KEY["alloy"]
 
 
 # ------------------------------------------------------------------ 表头匹配
+#
+# 一条表头只做三件事，顺序固定、每步只负责一件事：
+#   1) 拆：把「名称」和「单位」分开。单位只从括号里或空格后面取，
+#      绝不从结尾字母硬猜——"抗拉强度 Rm" 的 m 是米吗？显然不是。
+#   2) 名：名称按 精确 -> 元素式 -> 去单位尾巴 -> 词干 -> 子串（长别名才允许）
+#      的顺序找字段。
+#   3) 门：表头单位与字段声明单位必须同类（%，MPa，h 不能混）。
+# 任何一步不确定就返回 None，交给上层当自定义列——宁缺勿错。
 
 _NORM = re.compile(r"[\s_\-/\\(\\)\[\]（）]+")
 
@@ -204,31 +212,10 @@ _NORM = re.compile(r"[\s_\-/\\(\\)\[\]（）]+")
 def _norm(s: str) -> str:
     s = (s or "").strip().lower()
     s = s.replace("（", "(").replace("）", ")")
-    s = _NORM.sub("", s)
-    return s
+    return _NORM.sub("", s)
 
 
-# 表头尾部常见的单位写法（归一化后形如 elongation%、e(gpa)->egpa、ec(%iacs)->eciacs）
-_UNIT_TAILS = ("iacs", "mpa", "gpa", "hrc", "hrb", "hbw", "wt.%", "wt%", "at.%", "at%",
-               "ppm", "%", "°c", "℃", "μm", "um", "nm", "mm", "cm", "kg",
-               "min", "sec", "hv", "hb", "h", "s", "k")
-
-
-def _strip_unit_tail(n: str) -> str:
-    """剥掉表头末尾的单位，**剥完必须能对上别名**才算数。
-
-    这样 `uts(mpa)` 剥成 `uts` 就停（不会继续把 s 也剥掉变成 `ut`），
-    而 `e(gpa)` 剥成 `e`、`ec(%iacs)` 剥成 `ec` 都能命中。
-    """
-    for u in _UNIT_TAILS:                      # 长的在前，避免先剥掉半个单位
-        if len(n) > len(u) and n.endswith(u):
-            cand = n[: -len(u)]
-            if cand in _ALIAS_INDEX:
-                return cand
-    return n
-
-
-# 反向索引：归一化别名 -> key
+# 反向索引：归一化别名 -> key（同一别名只能指向一个字段）
 _ALIAS_INDEX: dict[str, str] = {}
 for _spec in FIELD_DICT:
     _ALIAS_INDEX[_norm(_spec.key.split(".")[-1])] = _spec.key
@@ -237,8 +224,7 @@ for _spec in FIELD_DICT:
         _ALIAS_INDEX.setdefault(_norm(_a), _spec.key)
 
 
-# ------------------------------------------------ 量纲门：单位对不上就不认这一列
-
+# 单位 -> 量纲类别
 _UNIT_DIM = {
     "°c": "temp", "℃": "temp", "k": "temp", "degc": "temp",
     "mpa": "stress", "gpa": "stress", "pa": "stress", "n/mm2": "stress", "kg/mm2": "stress",
@@ -248,136 +234,184 @@ _UNIT_DIM = {
     "hv": "hardness", "hb": "hardness", "hbw": "hardness", "hrc": "hardness", "hrb": "hardness",
     "wt.%": "massfrac", "wt%": "massfrac", "at.%": "atfrac", "at%": "atfrac", "ppm": "massfrac",
     "mm": "length", "cm": "length", "um": "length", "μm": "length", "nm": "length", "m": "length",
-    "j": "energy", "kj": "energy", "mpa√m": "toughness",
+    "j": "energy", "kj": "energy",
 }
+_UNIT_TOKENS = tuple(sorted(_UNIT_DIM, key=len, reverse=True))
 
 
 def _unit_dim(unit: str) -> str:
-    """把单位字符串归一成量纲类别；认不出返回空串（不参与判断）。"""
-    u = "".join((unit or "").lower().split())
-    if not u:
-        return ""
-    return _UNIT_DIM.get(u, "")
+    """单位字符串 -> 量纲类别；认不出给空串（不参与判断）。"""
+    return _UNIT_DIM.get("".join((unit or "").lower().split()), "")
 
 
-def _header_unit_dim(header: str) -> str:
-    """从表头里取单位，返回量纲类别。
+def split_header(header: str) -> tuple[str, str]:
+    """把表头拆成（归一化名称, 量纲）。
 
-    只看**括号里**或**空格后面**的写法，绝不从结尾字母硬猜：
-    否则 "抗拉强度 Rm" 结尾的 "m"（米）会被当成单位，整列被误拒。
+    单位只认两种位置：**结尾括号里**（`Elongation (%)`）或**结尾空格后**
+    （`Fe ppm`）。这样 "抗拉强度 Rm" 不会被当成"以米为单位"。
     """
     h = (header or "").strip()
-    m = re.search(r"[\(\（]\s*([^()（）]{1,12}?)\s*[\)\）]\s*$", h)
-    if m:
-        return _unit_dim(m.group(1))
-    m = re.search(r"\s([A-Za-z%°℃/]{1,10})\s*$", h)
-    if m:
-        return _unit_dim(m.group(1))
-    return ""
+    for pat in (r"[\(\（]\s*([^()（）]{1,12}?)\s*[\)\）]\s*$",
+                r"\s([A-Za-z%°℃/]{1,10})\s*$"):
+        m = re.search(pat, h)
+        # 只有**认得出来**的单位才算单位：`w(Si)` 的 Si、`Uniform elongation`
+        # 结尾的 elongation 都不是单位，硬当单位拆会把名字切碎。
+        if m and _unit_dim(m.group(1)):
+            return _norm(h[: m.start()]), _unit_dim(m.group(1))
+    return _norm(h), ""
 
 
-def _dim_ok(header: str, spec) -> bool:
-    """表头带的单位与字段声明的单位必须同类。
+def _strip_unit_tail(n: str) -> str:
+    """名字里还残留单位时剥掉（`siwt.%` -> `si`）。
 
-    这一条能挡住绝大多数"字符串像但其实不是"的错配：`Elongation (%)` 是 ratio，
-    而抗拉强度要求 stress —— 单位对不上就不认，直接当自定义列。
-    两边只要有一边没有单位，就不做判断（原文常常不写单位）。
+    剥完必须能对上别名才算数，否则 `uts` 会被继续剥成 `ut`。
     """
-    hu, su = _header_unit_dim(header), _unit_dim(getattr(spec, "unit", "") or "")
-    if not hu or not su:
-        return True
-    return hu == su
+    for u in _UNIT_TOKENS:
+        if len(n) > len(u) and n.endswith(u):
+            cand = n[: -len(u)]
+            if cand in _ALIAS_INDEX or f"composition.{cand[:2].capitalize()}" in BY_KEY:
+                return cand
+    return n
 
 
-def match_header(header: str) -> FieldSpec | None:
-    """把 Excel 表头匹配到标准字段。匹配不到返回 None（按自定义列处理）。"""
-    spec = _match_header_raw(header)
-    n = _norm(header)
-    if spec is not None and not _dim_ok(header, spec):
-        return None                      # 单位量纲不符：宁可认不出，也不能认错
-    return spec
+_ELEMENT_TAIL = re.compile(r"(?:含量|质量分数|wt|mas|at|ppm|%|\.)*")
 
 
-def _match_header_raw(header: str) -> FieldSpec | None:
-    n = _norm(header)
-    if not n:
-        return None
-    if n in _ALIAS_INDEX:
-        return BY_KEY[_ALIAS_INDEX[n]]
-    # 成分列的常见写法：Si(wt.%) / Si 含量 / w(Si)
-    # 关键：元素符号后面只允许跟单位类尾巴，否则 "elongation%" 会被切成 "el"，
-    # 而 "elongation" 里的 "ti" 又会被子串兜底当成 Ti —— 数据就串列了。
-    cand = n
+def _element_spec(name: str) -> FieldSpec | None:
+    """成分列写法：Si / Si(wt.%) / w(Si) / Fe ppm。
+
+    元素符号之后**只允许**单位类尾巴，否则 "elongation" 会被切出一个 "el"，
+    而 "elongation" 里的 "ti" 又会被误认成钛。
+    """
+    cand = name
     if cand.startswith("w("):
         cand = cand[2:]
     elif cand.startswith("w") and len(cand) > 2:
         cand = cand[1:]
     cand = cand.replace(")", "")
     m = re.match(r"^([a-z]{1,2})", cand)
-    if m:
-        sym = m.group(1).capitalize()
-        rest = cand[m.end():]
-        key = f"composition.{sym}"
-        if key in BY_KEY and re.fullmatch(
-                r"(?:含量|质量分数|wt|mas|at|ppm|%|\.)*", rest):
-            return BY_KEY[key]
-    # 去掉单位尾巴再试一次原名（elongation% -> elongation、e(gpa) -> e、ec(%iacs) -> ec）
-    bare = _strip_unit_tail(n)
-    if bare and bare != n and bare in _ALIAS_INDEX:
-        return BY_KEY[_ALIAS_INDEX[bare]]
-    # 子串包含：仅限**足够长的别名**兜底。
-    # 短别名（rm / ys / el / hv / ec / sn …）一旦参与子串匹配就会张冠李戴，
-    # 实测："Uniform elongation" 命中 rm（unifo-RM）→ 抗拉强度；
-    # "Analysis" 命中 ys → 屈服强度；"Brinell hardness" 命中 el → 延伸率。
-    best = ""
-    for alias, key in _ALIAS_INDEX.items():
-        # 中文别名 3 字起（"延伸率""固溶温度"这类不会被英文单词吞掉），
-        # 英文别名必须 4 字母起（rm / ys / el / hv 太短，会命中单词内部）。
-        need = 3 if any("\u4e00" <= ch <= "\u9fff" for ch in alias) else 4
-        if len(alias) < need or alias not in n:
-            continue
-        if len(alias) > len(best):             # 最长匹配优先
-            best = alias
-    if best:
-        return BY_KEY[_ALIAS_INDEX[best]]
+    if not m:
+        return None
+    key = f"composition.{m.group(1).capitalize()}"
+    if key in BY_KEY and _ELEMENT_TAIL.fullmatch(cand[m.end():]):
+        return BY_KEY[key]
     return None
+
+
+_STEM_SUFFIX = ("ations", "ation", "ments", "ment", "ings", "ing", "ions", "ion",
+                "ities", "ity", "ed", "es", "s")
+
+
+def _stem(w: str) -> str:
+    """极简词干化：elongation/elongated/elongations -> elongat。
+
+    只用于英文（中文没有词形变化），避免引入 nltk 这类依赖。
+    """
+    for suf in _STEM_SUFFIX:
+        if len(w) > len(suf) + 3 and w.endswith(suf):
+            return w[: -len(suf)]
+    return w
+
+
+def _lookup(name: str, fuzzy: bool = True) -> FieldSpec | None:
+    if not name:
+        return None
+    if name in _ALIAS_INDEX:                              # 1 精确
+        return BY_KEY[_ALIAS_INDEX[name]]
+    spec = _element_spec(name)                            # 2 元素式
+    if spec:
+        return spec
+    bare = _strip_unit_tail(name)                         # 3 去掉残留单位
+    if bare != name:
+        if bare in _ALIAS_INDEX:
+            return BY_KEY[_ALIAS_INDEX[bare]]
+        spec = _element_spec(bare)
+        if spec:
+            return spec
+    if not fuzzy:
+        return None
+    st = _stem(name)                                      # 4 词干
+    if st != name:
+        if st in _ALIAS_INDEX:
+            return BY_KEY[_ALIAS_INDEX[st]]
+        for alias, key in _ALIAS_INDEX.items():
+            if _stem(alias) == st:
+                return BY_KEY[key]
+    best = ""                                             # 5 子串（最长优先）
+    for alias, key in _ALIAS_INDEX.items():
+        need = 3 if any("\u4e00" <= ch <= "\u9fff" for ch in alias) else 4
+        if len(alias) >= need and alias in name and len(alias) > len(best):
+            best = alias
+    return BY_KEY[_ALIAS_INDEX[best]] if best else None
+
+
+def _dim_ok(head_dim: str, spec) -> bool:
+    spec_dim = _unit_dim(getattr(spec, "unit", "") or "")
+    return True if not head_dim or not spec_dim else head_dim == spec_dim
+
+
+def _unit_token(header: str) -> str:
+    """取出表头里写的那个单位原文（归一化），用于区分同量纲的不同字段（HV / HB）。"""
+    h = (header or "").strip()
+    for pat in (r"[\(\（]\s*([^()（）]{1,12}?)\s*[\)\）]\s*$",
+                r"\s([A-Za-z%°℃/]{1,10})\s*$"):
+        m = re.search(pat, h)
+        if m and _unit_dim(m.group(1)):
+            return "".join(m.group(1).lower().split())
+    return ""
+
+
+def _find(header: str, fuzzy: bool) -> FieldSpec | None:
+    """先按「名称」找，再退回「整串」找，最后按具体单位挑同量纲字段。
+
+    退回整串是必要的：`硬度 HB`、`EC (%IACS)` 这类写法，别名表里存的是
+    连写的整体（硬度hb / eciacs），拆开反而找不着。
+    """
+    name, dim = split_header(header)
+    spec = None
+    for cand in (name, _norm(header)):
+        spec = _lookup(cand, fuzzy=fuzzy)
+        if spec is not None and _dim_ok(dim, spec):
+            break
+        spec = None
+    if spec is None:
+        return None
+    # 同量纲有多个字段（硬度 HV / HB）：表头写了哪个单位就用哪个
+    tok = _unit_token(header)
+    if dim == "hardness" and tok in ("hv", "hb", "hbw", "hrc", "hrb"):
+        want = "HV" if tok == "hv" else "HB"
+        alt = BY_KEY.get(f"properties.hardness_{want}")
+        if alt is not None:
+            return alt
+    return spec
+
+
+def match_header(header: str) -> FieldSpec | None:
+    """宽松匹配：抽取时用（认不出就当自定义列，不会伤数据）。"""
+    return _find(header, fuzzy=True)
 
 
 def strict_spec_for_header(header: str) -> FieldSpec | None:
-    """保守版表头匹配：只接受「别名原样」和「元素+单位」两种确定性写法。
+    """保守匹配：写回 Excel 时用（只认精确别名与元素式，不做词干/子串兜底）。
 
-    与 match_header 的区别：去掉了最后那步"子串包含兜底"。
-    抽取时用宽松匹配无妨（不确定就变成了自定义列）；但**写回 Excel** 时
-    子串兜底会把数据塞进不该去的列（例如表头"Al 余量说明"命中了 Al 列），
-    属于擅自改写用户的表。这里宁可对不上、明确告诉用户，也不猜。
+    写回要改用户的表，宁可对不上、明确告诉用户"跳过"，也不猜。
     """
-    n = _norm(header)
-    if not n:
-        return None
-    key = _ALIAS_INDEX.get(n)
-    if key:
-        return BY_KEY.get(key)
-    # 中文/全称写法带了单位尾巴：硅含量 / 屈服强度 MPa —— 去掉尾巴再认一次
-    tail = re.sub(r"(含量|质量分数|wt\.?%|at\.?%|wt|at|ppm|mpa|gpa|hv|hb|%)$", "", n)
-    if tail and tail != n and tail in _ALIAS_INDEX:
-        return BY_KEY[_ALIAS_INDEX[tail]]
-    # 成分列的常见写法：Si(wt.%) / Si 含量 / w(Si)
-    # 必须用 fullmatch：元素符号之后只允许跟单位尾巴。用 search 时
-    # "siwt.%" 会被贪心截成 "siw"，连 Si 都对不上（实测踩过）。
-    m = re.fullmatch(
-        r"w?([a-z]{1,3})(?:含量|质量分数|wt\.?%|at\.?%|wt|at|ppm|%)?", n)
-    if m:
-        return BY_KEY.get(f"composition.{m.group(1).capitalize()}")
-    return None
+    return _find(header, fuzzy=False)
 
 
-def build_schema_from_headers(headers: list[str]) -> dict:
+def build_schema_from_headers(headers: list[str],
+                              samples: dict[str, list] | None = None) -> dict:
     """由 Excel 表头生成抽取 schema。
+
+    samples: {表头: 该列的若干非空取值}。给了样本时，表头认不出的列会再用
+    「数值形状」反推一次（唯一候选才接受），比纯文字匹配多认一截老文献表头。
 
     返回 {"matched": [...], "custom": [...], "specs": {key: FieldSpec}}
     每个 spec 的 header 字段被设为目标表里的原始列名，写回时以它为准。
     """
     import dataclasses
+
+    from .normalize import infer_field_from_values
 
     matched, custom, specs = [], [], {}
     used_keys: set[str] = set()
@@ -386,11 +420,18 @@ def build_schema_from_headers(headers: list[str]) -> dict:
         if not h:
             continue
         spec = match_header(h)
+        inferred = ""
+        if spec is None and samples and samples.get(h):
+            _name, dim = split_header(h)
+            key, why = infer_field_from_values(samples[h], BY_KEY, used_keys, dim)
+            if key:
+                spec, inferred = BY_KEY[key], why
         if spec and spec.key not in used_keys:
             used_keys.add(spec.key)
             spec = dataclasses.replace(spec, header=h)      # 绑定原始表头
             matched.append({"header": h, "key": spec.key, "label": spec.label,
-                            "group": spec.group, "unit": spec.unit, "kind": spec.kind})
+                            "group": spec.group, "unit": spec.unit, "kind": spec.kind,
+                            **({"inferred": inferred} if inferred else {})})
             specs[spec.key] = spec
         elif spec and spec.key in used_keys:
             continue
