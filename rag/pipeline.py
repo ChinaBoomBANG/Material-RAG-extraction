@@ -301,6 +301,24 @@ class RagPipeline:
             except Exception as e:
                 join_stats = {"error": f"{type(e).__name__}: {e}"}
 
+        # 行级常识校验：物理上不可能的行剔掉（抗拉<屈服、延伸率超 0~60、硬度与强度差一个数量级…），
+        # 可疑但可能真实的（T6 却低屈服、塑性强度组合异常）只标注不删。
+        quality_stats = None
+        qc = self.conf.get("extract", {}).get("row_checks", {}) or {}
+        if qc.get("enabled", True) and records:
+            from .extract.quality import filter_rows
+            try:
+                before_q = len(records)
+                records, q_dropped = filter_rows(records, self.conf)
+                if q_dropped:
+                    self.extractor.dropped.extend(q_dropped)
+                quality_stats = {"rows_in": before_q, "rows_out": len(records),
+                                 "dropped": len(q_dropped),
+                                 "flagged": sum(1 for r in records
+                                                if any("常识复核" in w for w in r.warnings))}
+            except Exception as e:
+                quality_stats = {"error": f"{type(e).__name__}: {e}"}
+
         # 文档级工艺补全：工艺参数在论文里常常只说一次（实验段落），
         # 块级抽取看不到跨块信息，工艺列就会几乎全空。这里每篇补一次。
         card_stats = None
@@ -331,6 +349,7 @@ class RagPipeline:
                 "process_card": card_stats,
                 "rounds": rounds_stats,
                 "join": join_stats,
+                "quality": quality_stats,
                 # 用抽取器记录的真实状态：不能在这里再调 should_stop()——
                 # 用户点过停止后 cancel 标记会一直为 True，会把没被中断的任务误报成「提前停止」
                 "stopped_early": bool(self.extractor.stopped_early),

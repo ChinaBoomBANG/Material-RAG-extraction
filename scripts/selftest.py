@@ -1904,6 +1904,59 @@ def t_shape_infer() -> None:
           "力学指标 (MPa)" in [c["header"] for c in built["custom"]])
 
 
+# ------------------------------- 29. 行级常识校验（物理不可能才剔，可疑只标）
+
+def t_row_checks() -> None:
+    print("\n[29] 行级常识校验")
+    from rag.extract.quality import filter_rows, row_issues
+    from rag.models import MaterialRecord
+
+    def mk(**kw):
+        label = kw.pop("label", "T6")
+        r = MaterialRecord(alloy="6061", row_label=label)
+        for k, v in kw.items():
+            r.properties[k] = FieldValue(value=v)
+        return r
+
+    conf = {"extract": {"row_checks": {"enabled": True}}}
+    good = mk(YS=310, UTS=340, elongation=11, hardness_HV=118)
+    kept, drop = filter_rows([good], conf)
+    check("正常 T6 行保留且无提示", len(kept) == 1 and not kept[0].warnings, f"{kept[0].warnings}")
+
+    bad = mk(YS=232, UTS=57)
+    kept, drop = filter_rows([bad], conf)
+    check("抗拉 < 屈服 -> 整行剔除（物理不可能）",
+          not kept and "物理上不可能" in drop[0]["reason"], f"{drop}")
+
+    low = mk(YS=60, UTS=110, elongation=30, label="O")
+    kept, drop = filter_rows([low], conf)
+    check("退火态低强度（60/110）不能被删，也不能被警示",
+          len(kept) == 1 and not kept[0].warnings, f"{kept[0].warnings if kept else '删了'}")
+
+    t6low = mk(YS=120, UTS=340, label="T6")
+    kept, drop = filter_rows([t6low], conf)
+    check("T6 状态却只有 120 MPa -> 保留并提示复核（不删）",
+          len(kept) == 1 and any("T6" in w for w in kept[0].warnings),
+          f"{kept[0].warnings if kept else '删了'}")
+
+    hb = mk(YS=300, UTS=330, hardness_HB=20)      # UTS/HB = 16.5，明显是两列写串
+    kept, drop = filter_rows([hb], conf)
+    check("硬度与强度差一个数量级 -> 剔除（疑似两列写串）",
+          not kept and "数量级" in drop[0]["reason"], f"{drop}")
+
+    el = mk(YS=300, UTS=330, elongation=80)
+    kept, drop = filter_rows([el], conf)
+    check("延伸率 80% -> 剔除", not kept and "延伸率" in drop[0]["reason"])
+
+    off = {"extract": {"row_checks": {"enabled": False}}}
+    kept, drop = filter_rows([mk(YS=232, UTS=57)], off)
+    check("开关关闭时一个都不删", len(kept) == 1 and not drop)
+
+    check("问题分级正确（hard 才有剔除权）",
+          [i["severity"] for i in row_issues(mk(YS=232, UTS=57))] == ["hard"],
+          str(row_issues(mk(YS=232, UTS=57))))
+
+
 def main() -> int:
     tmp = tempfile.mkdtemp(prefix="ragtest_")
     try:
@@ -1935,6 +1988,7 @@ def main() -> int:
         t_join_rows()
         t_header_traps()
         t_shape_infer()
+        t_row_checks()
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
