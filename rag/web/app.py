@@ -351,13 +351,15 @@ def extract_start(req: StartReq):
             used_workers = int(res.get("workers") or used_workers)
             payload = _extract_payload(res, req.excel_path)
             _JOBS[jid]["result"] = payload
-            _save_last_result(jid, _JOBS[jid], payload)
+            _JOBS[jid]["finished_at"] = time.time()
+            saved = _save_last_result(jid, _JOBS[jid], payload)
             # done 事件带上本批全部 chunk_id：即使中途某个订阅者漏了进度事件，
             # 光靠这一条也能把"已抽到哪"补回来（继续抽取的按钮靠它）。
             _publish(jid, {"type": "done", "result": payload,
                            "chunk_ids": list(_JOBS[jid]["done_ids"])})
             _log(f"[extract] {jid} 完成：{payload.get('picked_chunks')} 块 / "
-                 f"{payload.get('records_count')} 条记录（已落盘）")
+                 f"{payload.get('records_count')} 条记录"
+                 f"（{'已落盘' if saved else '落盘失败，刷新页面会丢失这批结果'}）")
         except Exception as e:                     # noqa: BLE001
             _JOBS[jid]["error"] = str(e)
             _JOBS[jid]["failed_at"] = time.time()
@@ -419,14 +421,31 @@ def _merge_payload(prev: dict | None, nxt: dict) -> dict:
     out["rows"] = list(old_rows) + list(nxt.get("rows") or [])
     for k in ("row_ids", "dropped", "records"):
         out[k] = list(prev.get(k) or []) + list(nxt.get(k) or [])
-    out["evidence"] = {**(prev.get("evidence") or {}), **(nxt.get("evidence") or {})}
+    old_ev = prev.get("evidence") or []
+    new_ev = nxt.get("evidence") or []
+    if isinstance(old_ev, dict) or isinstance(new_ev, dict):      # 兼容旧格式（dict）
+        out["evidence"] = {**(old_ev if isinstance(old_ev, dict) else {}),
+                           **(new_ev if isinstance(new_ev, dict) else {})}
+    else:                                                          # 现行格式：list
+        seen, merged = set(), []
+        for ev in list(old_ev) + list(new_ev):
+            k = (ev.get("record_id"), ev.get("列"), str(ev.get("值")))
+            if k in seen:
+                continue
+            seen.add(k)
+            merged.append(ev)
+        out["evidence"] = merged
     for k in ("records_count", "picked_chunks"):
         out[k] = (prev.get(k) or 0) + (nxt.get(k) or 0)
     return out
 
 
-def _save_last_result(jid: str, job: dict, payload: dict) -> None:
-    """任务收工后把结果写盘（原子写，避免半截文件）。"""
+def _save_last_result(jid: str, job: dict, payload: dict) -> bool:
+    """任务收工后把结果写盘（原子写，避免半截文件）。返回是否真的写成功。
+
+    必须返回成功与否：这里以前是 except: pass，续抽时合并抛 TypeError 被吞掉，
+    盘上仍是上一批 —— 用户刷新后看到的是旧结果，日志却写着"已落盘"。
+    """
     try:
         prev = _read_last_result()
         # 续抽（带了 skip_ids）就接在上一批后面；全新开始则整份覆盖。
@@ -448,8 +467,11 @@ def _save_last_result(jid: str, job: dict, payload: dict) -> None:
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False)
         os.replace(tmp, p)
-    except Exception:                              # noqa: BLE001
-        pass
+        return True
+    except Exception as e:                         # noqa: BLE001
+        _log(f"[extract] {jid} 落盘失败：{type(e).__name__}: {e}\n"
+             f"{traceback.format_exc()[-800:]}")
+        return False
 
 
 def _clear_last_result() -> None:

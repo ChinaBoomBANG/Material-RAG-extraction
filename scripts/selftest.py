@@ -1957,6 +1957,50 @@ def t_row_checks() -> None:
           str(row_issues(mk(YS=232, UTS=57))))
 
 
+# ------------------------------- 30. 结果落盘（续抽合并 / 失败不静默）
+
+def t_persist(tmp) -> None:
+    print("\n[30] 结果落盘与续抽合并")
+    import rag.web.app as webapp
+
+    prev = {"headers": ["合金牌号", "Si"], "rows": [{"合金牌号": "6061", "Si": 0.6}],
+            "records": [{"record_id": "a"}], "row_ids": ["a"],
+            "evidence": [{"record_id": "a", "列": "Si", "值": 0.6}],
+            "records_count": 1, "picked_chunks": 2, "dropped": []}
+    nxt = {"headers": ["合金牌号", "Si"], "rows": [{"合金牌号": "6082", "Si": 0.9}],
+           "records": [{"record_id": "b"}], "row_ids": ["b"],
+           "evidence": [{"record_id": "a", "列": "Si", "值": 0.6},
+                        {"record_id": "b", "列": "Si", "值": 0.9}],
+           "records_count": 1, "picked_chunks": 3, "dropped": []}
+    merged = webapp._merge_payload(prev, nxt)
+    check("续抽合并：evidence 是列表也能合并（以前这里 TypeError 被吞掉）",
+          isinstance(merged["evidence"], list) and len(merged["evidence"]) == 2,
+          f"{type(merged['evidence']).__name__} / {len(merged['evidence'])}")
+    check("续抽合并：行与记录都接上", len(merged["rows"]) == 2
+          and len(merged["records"]) == 2 and merged["picked_chunks"] == 5)
+
+    # 落盘失败必须返回 False 并写日志，不能假装成功
+    out = os.path.join(tmp, "persist")
+    os.makedirs(out, exist_ok=True)
+    old_path = webapp._last_result_path
+    old_log = webapp._log
+    webapp._last_result_path = lambda: os.path.join(out, "last_extract.json")
+    webapp._log = lambda msg: None          # 测试别往生产的 web.log 里写
+    try:
+        ok = webapp._save_last_result("j1", {"req": {}, "done_ids": ["c1"]}, prev)
+        check("落盘成功时返回 True", ok is True, str(ok))
+        orig = webapp.json.dump
+        webapp.json.dump = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("磁盘满"))
+        try:
+            bad = webapp._save_last_result("j2", {"req": {}, "done_ids": []}, prev)
+        finally:
+            webapp.json.dump = orig
+        check("落盘失败时返回 False（不再静默吞掉）", bad is False, str(bad))
+    finally:
+        webapp._last_result_path = old_path
+        webapp._log = old_log
+
+
 def main() -> int:
     tmp = tempfile.mkdtemp(prefix="ragtest_")
     try:
@@ -1989,6 +2033,7 @@ def main() -> int:
         t_header_traps()
         t_shape_infer()
         t_row_checks()
+        t_persist(tmp)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
